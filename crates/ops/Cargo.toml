@@ -7,7 +7,12 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+futhark-gpu.workspace = true
 futhark-graph.workspace = true
+png.workspace = true
+pollster.workspace = true
+wgpu.workspace = true
+zune-jpeg.workspace = true
 
 [lints]
 workspace = true

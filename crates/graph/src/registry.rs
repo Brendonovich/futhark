@@ -1,6 +1,9 @@
-use std::{collections::BTreeMap, ops::RangeInclusive, sync::Arc};
+use std::{collections::BTreeMap, ops::RangeInclusive, path::Path, sync::Arc};
 
-use crate::{ChannelCx, ChannelOp, CookError, Family, Output, ParamSpec, Params, Time, Value};
+use crate::{
+    ChannelCx, ChannelOp, CookError, Family, Output, ParamSpec, Params, TextureCx, TextureOp, TextureParams, Time,
+    Value, engine::GpuState, texture,
+};
 
 /// The type name of the plain container component.
 pub(crate) const BASE_COMPONENT: &str = "component/base";
@@ -65,6 +68,23 @@ impl Registry {
         });
     }
 
+    /// Adds a Texture operator type. Its parameters follow the common ones in [`TextureParams`].
+    pub fn add_texture<T: TextureOp>(&mut self) {
+        let spec = T::SPEC;
+        let mut params = TextureParams::specs();
+        params.extend(T::Params::specs());
+        self.insert(OpType {
+            name: spec.name,
+            label: spec.label,
+            doc: spec.doc,
+            family: Family::Texture,
+            inputs: spec.inputs,
+            time_dependent: spec.time_dependent,
+            params,
+            create: Some(|| Box::new(TextureAdapter(T::default()))),
+        });
+    }
+
     fn insert(&mut self, op_type: OpType) {
         let name = op_type.name;
         assert!(
@@ -86,16 +106,26 @@ impl Registry {
     }
 }
 
+/// What the engine hands an operator to cook.
+pub(crate) struct CookCx<'a> {
+    pub time: Time,
+    pub inputs: &'a [Output],
+    pub values: &'a [Value],
+    pub gpu: Option<&'a mut GpuState>,
+    pub project_dir: Option<&'a Path>,
+}
+
 /// An operator instance with its family erased.
 pub(crate) trait DynOp {
-    fn cook(&mut self, time: Time, inputs: &[Output], values: &[Value]) -> Result<Output, CookError>;
+    fn cook(&mut self, cx: CookCx<'_>) -> Result<Output, CookError>;
 }
 
 struct ChannelAdapter<T>(T);
 
 impl<T: ChannelOp> DynOp for ChannelAdapter<T> {
-    fn cook(&mut self, time: Time, inputs: &[Output], values: &[Value]) -> Result<Output, CookError> {
-        let inputs = inputs
+    fn cook(&mut self, cx: CookCx<'_>) -> Result<Output, CookError> {
+        let inputs = cx
+            .inputs
             .iter()
             .map(|input| {
                 input
@@ -103,8 +133,58 @@ impl<T: ChannelOp> DynOp for ChannelAdapter<T> {
                     .ok_or_else(|| CookError::new("an input is not a Channel operator"))
             })
             .collect::<Result<_, _>>()?;
-        let params = T::Params::from_values(values);
-        let channels = self.0.cook(&ChannelCx { time, inputs }, &params)?;
+        let params = T::Params::from_values(cx.values);
+        let channels = self.0.cook(&ChannelCx { time: cx.time, inputs }, &params)?;
         Ok(Output::Channels(Arc::new(channels)))
+    }
+}
+
+struct TextureAdapter<T>(T);
+
+impl<T: TextureOp> DynOp for TextureAdapter<T> {
+    fn cook(&mut self, cx: CookCx<'_>) -> Result<Output, CookError> {
+        let Some(state) = cx.gpu else {
+            return Err(CookError::new(
+                "Texture operators need a GPU, and this engine has none (see Engine::with_gpu)",
+            ));
+        };
+        let inputs: Vec<_> = cx
+            .inputs
+            .iter()
+            .map(|input| {
+                input
+                    .texture()
+                    .ok_or_else(|| CookError::new("an input is not a Texture operator"))
+            })
+            .collect::<Result<_, _>>()?;
+        let (common, own) = cx.values.split_at(TextureParams::specs().len());
+        let common = TextureParams::from_values(common);
+        let params = T::Params::from_values(own);
+        let (width, height, format) = texture::resolve(&common, inputs.first().copied());
+
+        let gpu = &*state.gpu;
+        let scope = gpu.error_scope();
+        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some(T::SPEC.name),
+        });
+        let mut texture_cx = TextureCx {
+            time: cx.time,
+            gpu,
+            encoder: &mut encoder,
+            width,
+            height,
+            format,
+            common,
+            inputs,
+            pool: &mut state.pool,
+            project_dir: cx.project_dir,
+        };
+        let result = self.0.cook(&mut texture_cx, &params);
+        let commands = result.is_ok().then(|| encoder.finish());
+        let errors = scope.finish();
+        let texture = result?;
+        errors.map_err(|error| CookError::new(format!("GPU error: {error}")))?;
+        state.pending.extend(commands);
+        Ok(Output::Texture(texture))
     }
 }

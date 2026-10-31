@@ -1,7 +1,13 @@
 //! The engine's GPU context. The engine creates the device whether it runs headless or windowed, and the editor's UI
 //! (Rune) adopts it, so textures are shown without leaving the GPU.
 
+mod draw;
+mod texture;
+
 use std::sync::Mutex;
+
+pub use draw::{FULLSCREEN_WGSL, Fit};
+pub use texture::{Texture, TextureKey, TexturePool};
 
 /// Features the engine uses when the adapter has them.
 const OPTIONAL_FEATURES: wgpu::Features = wgpu::Features::TIMESTAMP_QUERY;
@@ -25,6 +31,7 @@ pub struct Gpu {
     pub adapter: wgpu::Adapter,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
+    drawer: Mutex<draw::Drawer>,
 }
 
 impl Gpu {
@@ -55,7 +62,18 @@ impl Gpu {
             adapter,
             device,
             queue,
+            drawer: Default::default(),
         })
+    }
+
+    /// Starts catching the device's validation, out-of-memory and internal errors on this thread, until
+    /// [`ErrorScope::finish`]. Without a scope, wgpu panics on errors.
+    pub fn error_scope(&self) -> ErrorScope {
+        ErrorScope([
+            self.device.push_error_scope(wgpu::ErrorFilter::Validation),
+            self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory),
+            self.device.push_error_scope(wgpu::ErrorFilter::Internal),
+        ])
     }
 
     /// Copies a 2D `Rgba8Unorm` texture to the CPU, waiting for the GPU. Rows are tightly packed.
@@ -65,8 +83,17 @@ impl Gpu {
             wgpu::TextureFormat::Rgba8Unorm,
             "read_rgba8 needs an Rgba8Unorm texture"
         );
+        self.read_texture(texture)
+    }
+
+    /// Copies a 2D texture of an uncompressed color format to the CPU, waiting for the GPU. Rows are tightly packed.
+    pub fn read_texture(&self, texture: &wgpu::Texture) -> Result<Vec<u8>, GpuError> {
+        let texel = texture
+            .format()
+            .block_copy_size(None)
+            .expect("read_texture needs an uncompressed color texture");
         let (width, height) = (texture.width(), texture.height());
-        let row = width * 4;
+        let row = width * texel;
         let padded_row = row.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("readback"),
@@ -110,5 +137,23 @@ impl Gpu {
             pixels.extend_from_slice(&line[..row as usize]);
         }
         Ok(pixels)
+    }
+}
+
+/// Device errors caught since [`Gpu::error_scope`].
+#[must_use = "an error scope must be finished to find out whether anything failed"]
+pub struct ErrorScope([wgpu::ErrorScopeGuard; 3]);
+
+impl ErrorScope {
+    /// Stops catching errors and returns the first one caught, if any.
+    pub fn finish(self) -> Result<(), String> {
+        let mut first = None;
+        // Scopes are popped innermost first.
+        for guard in self.0.into_iter().rev() {
+            if let Some(error) = pollster::block_on(guard.pop()) {
+                first.get_or_insert(error.to_string());
+            }
+        }
+        first.map_or(Ok(()), Err)
     }
 }

@@ -4,7 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use futhark_graph::{Clock, Engine, Registry, Value};
+use futhark_graph::{Clock, Engine, Gpu, Registry, Value};
 use futhark_project::{Diagnostic, Project, load, save};
 
 fn registry() -> Arc<Registry> {
@@ -78,6 +78,24 @@ fn the_hello_example_cooks() {
         Some(&Value::Menu("triangle".into()))
     );
     assert!(engine.pull(wobble).unwrap().channels().unwrap().get("wobble").is_some());
+}
+
+#[test]
+fn the_textures_example_cooks() {
+    let (project, _) = load(&example("textures"), registry()).unwrap();
+    let gpu = Arc::new(Gpu::headless().expect("a GPU adapter (on Linux CI, lavapipe)"));
+    let mut engine = Engine::new(
+        project.network,
+        Clock {
+            rate: project.rate,
+            frame: 30,
+        },
+    )
+    .with_gpu(gpu);
+    let out = engine.network().find("/out").unwrap();
+    let output = engine.pull(out).unwrap();
+    let texture = output.texture().unwrap();
+    assert_eq!((texture.width(), texture.height()), (640, 360));
 }
 
 #[test]

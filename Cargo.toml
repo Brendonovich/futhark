@@ -17,6 +17,8 @@ futhark-project = { path = "crates/project" }
 
 clap = { version = "=4.6.7", features = ["derive"] }
 kdl = { version = "=6.7.1", default-features = false }
+# PNG decoding for File In, and encoding for golden-image tests. Pure Rust.
+png = "=0.18.1"
 pollster = "=1.0.1"
 proc-macro2 = "=1.0.107"
 quote = "=1.0.47"
@@ -27,6 +29,8 @@ thiserror = "=2.0.21"
 # same reason: no GL backend, and WGSL as the only shader language. Vulkan and DX12 are added per platform in
 # crates/gpu.
 wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "metal", "wgsl"] }
+# JPEG decoding for File In: pure Rust, and the decoder the image crate uses.
+zune-jpeg = "=0.5.15"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

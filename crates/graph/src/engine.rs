@@ -1,6 +1,15 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
-use crate::{CookError, Network, OpId, Output, Time, registry::DynOp};
+use futhark_gpu::{Gpu, TexturePool};
+
+use crate::{
+    CookError, Network, OpId, Output, Time,
+    registry::{CookCx, DynOp},
+};
 
 /// Time-dependent operators that haven't been pulled for a while catch up on at most this much time.
 const MAX_SLICE_SECONDS: f64 = 0.2;
@@ -46,6 +55,13 @@ impl State {
     }
 }
 
+/// The engine's GPU, its texture pool, and work recorded during a pull that hasn't been submitted yet.
+pub(crate) struct GpuState {
+    pub gpu: Arc<Gpu>,
+    pub pool: TexturePool,
+    pub pending: Vec<wgpu::CommandBuffer>,
+}
+
 /// Cooks a network. Cooking is pull-based: nothing cooks until something asks for its output with `pull`, and then
 /// only operators with a reason to cook do (an edit, an input that changed, or a new frame for time-dependent ones).
 pub struct Engine {
@@ -56,9 +72,12 @@ pub struct Engine {
     /// Bumped on every frame and network change. Within one epoch each operator is checked at most once.
     epoch: u64,
     seen_network: u64,
+    gpu: Option<GpuState>,
+    project_dir: Option<PathBuf>,
 }
 
 impl Engine {
+    /// An engine without a GPU, which cooks every family but Texture.
     pub fn new(network: Network, clock: Clock) -> Self {
         Engine {
             network,
@@ -67,7 +86,34 @@ impl Engine {
             revision: 0,
             epoch: 1,
             seen_network: 0,
+            gpu: None,
+            project_dir: None,
         }
+    }
+
+    /// Cooks Texture operators on `gpu`. All of their GPU work runs inside wgpu error scopes on the thread that
+    /// pulls, so errors become cook errors rather than panics.
+    pub fn with_gpu(mut self, gpu: Arc<Gpu>) -> Self {
+        self.gpu = Some(GpuState {
+            gpu,
+            pool: TexturePool::default(),
+            pending: Vec::new(),
+        });
+        self
+    }
+
+    /// Resolves relative file paths in parameters (such as File In's) against `dir`.
+    pub fn with_project_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.project_dir = Some(dir.into());
+        self
+    }
+
+    pub fn gpu(&self) -> Option<&Arc<Gpu>> {
+        self.gpu.as_ref().map(|state| &state.gpu)
+    }
+
+    pub fn project_dir(&self) -> Option<&Path> {
+        self.project_dir.as_deref()
     }
 
     pub fn network(&self) -> &Network {
@@ -90,9 +136,12 @@ impl Engine {
     pub fn set_frame(&mut self, frame: i64) {
         self.clock.frame = frame;
         self.epoch += 1;
+        if let Some(gpu) = &mut self.gpu {
+            gpu.pool.trim();
+        }
     }
 
-    /// Brings an operator up to date and returns its output.
+    /// Brings an operator up to date and returns its output. GPU work for a texture is submitted before this returns.
     pub fn pull(&mut self, id: OpId) -> Result<Output, CookError> {
         if self.network.revision != self.seen_network {
             self.seen_network = self.network.revision;
@@ -100,7 +149,13 @@ impl Engine {
             let network = &self.network;
             self.states.retain(|id, _| network.get(*id).is_some());
         }
-        self.ensure(id)?;
+        let result = self.ensure(id);
+        if let Some(gpu) = &mut self.gpu
+            && !gpu.pending.is_empty()
+        {
+            gpu.gpu.queue.submit(gpu.pending.drain(..));
+        }
+        result?;
         Ok(self.states[&id]
             .output
             .clone()
@@ -203,7 +258,13 @@ impl Engine {
                 rate: self.clock.rate,
                 slice_start,
             };
-            let result = state.op.cook(time, &outputs, &values);
+            let result = state.op.cook(CookCx {
+                time,
+                inputs: &outputs,
+                values: &values,
+                gpu: self.gpu.as_mut(),
+                project_dir: self.project_dir.as_deref(),
+            });
             self.revision += 1;
             state.cooked = self.revision;
             state.changed = self.revision;

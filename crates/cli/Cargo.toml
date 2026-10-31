@@ -8,10 +8,14 @@ repository.workspace = true
 
 [dependencies]
 clap.workspace = true
+futhark-client.workspace = true
 futhark-gpu.workspace = true
 futhark-graph.workspace = true
 futhark-ops.workspace = true
 futhark-project.workspace = true
+futhark-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

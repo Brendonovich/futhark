@@ -110,15 +110,20 @@ pub fn create(dir: &Path, project: &Project) -> Result<(), ProjectError> {
 
 /// Saves a project, writing only files whose contents changed.
 pub fn save(dir: &Path, project: &Project) -> Result<(), ProjectError> {
+    write(dir, &project.name, project.rate, &project.network)
+}
+
+/// Saves a project from its parts, for callers that keep the network elsewhere (such as in a running engine).
+pub fn write(dir: &Path, name: &str, rate: f64, network: &Network) -> Result<(), ProjectError> {
     fs::create_dir_all(dir).map_err(|source| ProjectError::Io {
         path: dir.into(),
         source,
     })?;
     let mut settings = String::new();
-    writeln!(settings, "name {}", quote(&project.name)).expect("writing to a string");
-    writeln!(settings, "rate {}", number(project.rate)).expect("writing to a string");
+    writeln!(settings, "name {}", quote(name)).expect("writing to a string");
+    writeln!(settings, "rate {}", number(rate)).expect("writing to a string");
     write_if_changed(&dir.join(PROJECT_FILE), &settings)?;
-    save_component(&dir.join(ROOT_DIR), &project.network, project.network.root())
+    save_component(&dir.join(ROOT_DIR), network, network.root())
 }
 
 struct Loader<'a> {

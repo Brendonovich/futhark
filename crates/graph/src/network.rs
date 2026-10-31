@@ -40,6 +40,7 @@ pub enum GraphError {
 }
 
 /// One operator in the network.
+#[derive(Clone)]
 pub struct Node {
     name: String,
     parent: Option<OpId>,
@@ -96,7 +97,9 @@ pub fn valid_name(name: &str) -> bool {
         && !matches!(name, "true" | "false" | "null" | "inf" | "nan")
 }
 
-/// The operators of a project, nested in components, with their parameters and wires.
+/// The operators of a project, nested in components, with their parameters and wires. Cloning is how a batch of
+/// edits applies all or nothing: edit a clone, then keep it or drop it.
+#[derive(Clone)]
 pub struct Network {
     registry: Arc<Registry>,
     nodes: HashMap<OpId, Node>,
@@ -134,6 +137,11 @@ impl Network {
 
     pub fn root(&self) -> OpId {
         self.root
+    }
+
+    /// Increases with every change, including ones that don't affect cooking (renames, positions).
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     pub fn get(&self, id: OpId) -> Option<&Node> {
@@ -268,6 +276,7 @@ impl Network {
         let children = &mut self.nodes.get_mut(&parent).expect("parents exist").children;
         children.remove(&old);
         children.insert(name.into(), id);
+        self.revision += 1;
         Ok(())
     }
 
@@ -346,6 +355,7 @@ impl Network {
 
     pub fn set_position(&mut self, id: OpId, position: [f32; 2]) {
         self.nodes.get_mut(&id).expect("exists").position = position;
+        self.revision += 1;
     }
 
     /// Whether `target` is `at` or feeds into it.

@@ -9,11 +9,14 @@ in `docs/research/touchdesigner.md`.
 - **Modern only.** No legacy features from TouchDesigner. That means no CPU surface geometry (SOPs), no Tscript, no
   OpenGL-era GLSL, and no "export" parameter mode (binds and expressions cover it).
 - **Plain names.** Families are called Texture, Channel, Geometry, Data, Shader and Component, not TOP, CHOP and so on.
-- **wgpu for every GPU operation**: texture ops, geometry, rendering and readback. Shaders are WGSL. Rune also renders
-  through wgpu (30.x), so the engine creates a single `wgpu::Device` that Rune adopts, and textures never leave the
-  GPU to be shown.
-- **The engine is headless.** The graph, cooking and operators know nothing about the UI. The editor is a thin Rune
-  client, and the engine can also run without a window: offline renders, tests, a CLI.
+- **wgpu for every GPU operation**: texture ops, geometry, rendering and readback. Shaders are WGSL.
+- **Client and server.** The engine runs in a server process, `futharkd`, that owns the project, the clock and the
+  GPU. Everything else is a client of one protocol: the CLI, the desktop app, agents (MCP) and, later, other
+  machines. Nothing is possible in one client that isn't possible through the protocol.
+- **The desktop app is a special local client.** It edits through the protocol like any other client, but it sees
+  operator viewers through shared GPU surfaces (IOSurfaces on macOS), so pictures reach the screen without a copy.
+- **The engine is headless.** The graph, cooking and operators know nothing about the UI, and also run in-process
+  without a server: offline renders, `check`, tests.
 
 ## Families
 
@@ -106,18 +109,61 @@ autocomplete, hover, signature help, type errors, go to definition, rename and s
   outputs a Texture. Each Geometry component holds a Geometry network and a Shader, and supports instancing with
   per-instance attributes from any family.
 
-## GPU device
+## Client and server
 
-The engine creates the wgpu instance, adapter, device and queue, and Rune adopts them.
+The architecture follows [Isocast](https://github.com/R44VC0RP/isocast) (`docs/shared-frames.md` and
+`docs/remote-engines.md` there).
 
-- The engine creates its device the same way whether it runs headless (CLI, tests) or windowed, so GPU code has a
-  single path.
-- When windowed, the engine checks that its adapter supports the window's surface. It creates the device with the
-  features and limits that both the engine and Rune need.
-- Rune today creates its own `Gpu` per window (`Gpu::for_surface` in `window.rs`) and has no public way to accept
-  one. `Gpu`'s fields are public, so the missing piece is a small upstream change: a run option that takes an
-  `Arc<Gpu>` and uses it instead of creating one. That change is the first task of the Editor milestone.
-- Engine textures are drawn in the UI through Rune effect slots and a compositor, on the same device, with no copies.
+### Processes
+
+- **`futharkd`** (`crates/server`) is the only process with engine state: the open project, the network, the clock,
+  the GPU device and the frame loop. The engine runs on one thread that owns it; connection threads send it jobs.
+- **Clients** find the local server at a socket path: `$FUTHARK_SOCKET`, otherwise `futharkd.sock` in the user's
+  application support directory on macOS or `$XDG_RUNTIME_DIR/futhark/` on Linux. `connect_or_launch` starts the
+  server detached if nothing answers, so the first client to need it brings it up.
+- **The server outlives its clients.** Closing the desktop app leaves the project running (an installation keeps
+  playing). It stops on `shutdown`, on a signal, or, with `--exit-on-stdin-close`, when its parent goes away (tests).
+- **Not everything needs a server.** `futhark check`, offline `cook` and renders, and tests load projects with the
+  engine in-process.
+
+### Protocol
+
+- **JSON-RPC 2.0, one JSON object per line**, over a Unix socket (owner-only). This is the one place JSON appears:
+  it is a wire format for tools and agents, not a file format.
+- **Methods**: `hello` (protocol version and capabilities), `status`, `create`, `open`, `save`, `close`, `types`
+  (every operator type's schema), `get` (a snapshot of the network with its revision), `edit`, `sample` (an
+  operator's current output), `watch`, `shared_frames` and `shutdown`.
+- **Edits are batches.** `edit` takes a list (add, remove, rename, set a parameter, connect, disconnect, move) and an
+  optional expected revision. The batch applies completely or not at all, and a stale revision fails with
+  `WRONG_STATE`, so clients never overwrite each other's changes silently.
+- **Events.** `watch` turns a connection into an event stream: `network_changed { revision }`, project opened,
+  closed and saved. Events carry revisions, not deltas; clients `get` again.
+- **Errors are for agents**: a stable code plus a message naming what was wrong and what would be valid.
+- **Versioning**: `hello` carries a protocol number. New methods are additive; an unknown method is
+  `METHOD_NOT_FOUND`.
+- **Streams take over a connection.** `watch` and `shared_frames` reply once, then the connection carries only that
+  stream. Clients open separate connections for calls, events and each viewer.
+
+### Shared frames
+
+How the desktop app sees viewers (`crates/surfaces`):
+
+- **The server owns a ring of IOSurfaces per viewer** (2–8 slots, `Bgra8Unorm`, sRGB-tagged), sized to the viewer's
+  maximum size with the picture's aspect. It renders the operator's texture into the next free slot with wgpu (the
+  IOSurface is imported as a Metal texture), and announces it only after the GPU has finished.
+- **Surfaces cross processes once, as Mach send rights.** The server registers a per-process Mach service and offers
+  each ring under a one-time token. The client fetches the ring by token, then every frame is a small message naming
+  a slot: `frame { generation, slot }`. The client sends `release { generation, slot }` when it no longer shows it.
+- **A slow client only stalls its own viewer.** When every slot is held the server skips that viewer's frames.
+- **The client shows a slot without copying**: Rune wraps the IOSurface (`PixelBuffer::from_iosurface`) and draws it
+  in a `NativeSurface`.
+- **Other platforms and remote clients** get encoded frames (H.264, or still images to start) instead. D3D12 shared
+  handles on Windows can come later.
+
+### Remote clients (later)
+
+Other machines connect over TCP with mutual TLS and pinned keys, paired once with a short code shown on the server
+(Isocast's design). Local-only methods (`shutdown`, opening arbitrary paths) are refused to them.
 
 ## Project files
 
@@ -240,24 +286,28 @@ suited to it. The registry erases the family so the engine cooks every operator 
 
 ## Architecture
 
-Planned workspace:
+Workspace:
 
 - `crates/graph`: the network model (operators, paths, wires, parameters, components), dirty tracking, the cook
-  scheduler and the clock. No GPU code.
-- `crates/gpu`: the wgpu context, texture and buffer pools, WGSL helpers and readback.
-- `crates/ops`: the built-in operators of every family.
+  scheduler and the clock.
 - `crates/macros`: the `Params` and `Menu` derives.
-- `crates/project`: reading and writing the KDL project format, the file watcher and reload, and `check`.
+- `crates/gpu`: the wgpu context, texture pools, WGSL helpers and readback.
+- `crates/ops`: the built-in operators of every family.
+- `crates/project`: reading and writing the KDL project format, the file watcher and reload.
+- `crates/surfaces`: shared GPU surfaces: IOSurfaces handed over as Mach ports on macOS.
+- `crates/protocol`: the protocol's types: methods, results, events, errors.
+- `crates/server`: `futharkd`, the server.
+- `crates/client`: the client library used by the CLI and the desktop app.
+- `crates/cli`: the `futhark` binary: a client of the server, plus offline `check`, `cook` and renders.
 - `crates/script`: the Luau runtime (mlua), expression compilation and evaluation, and generation of the definition
   files and sourcemap.
-- `crates/cli`: the `futhark` binary: headless runs, offline renders, `check`, `defs` and `docs`.
-- `apps/editor`: the Rune desktop app, including:
+- `apps/desktop`: the Rune desktop app, a client of the server, including:
   - a network editor (a canvas with pan and zoom, nodes, wires)
-  - a viewer for each family (textures drawn straight from the shared device through Rune effect slots)
+  - a viewer for each family (textures through shared frames)
   - a parameter inspector
   - output windows and perform mode
 
-Rune: pin `anomalyco/rune` to an exact `rev` on `dev`. Its wgpu is `~30.0.1`; ours must match.
+Rune: pin `anomalyco/rune` to an exact `rev` on `dev`.
 
 ## Milestones
 
@@ -265,10 +315,11 @@ Rune: pin `anomalyco/rune` to an exact `rev` on `dev`. Its wgpu is `~30.0.1`; ou
    offline and headless.
 2. **Graph core** (done): operators, wires, the `Params` derive, pull cooking and dirty propagation, and reading and writing
    KDL. Channel operators (Constant, LFO, Noise, Math) are the first test bed.
-3. **Textures**: Constant, Ramp, Noise, Transform, Level, Composite, Shader, and File In. Headless golden-image tests
-   via readback.
-4. **Editor**: the upstream Rune change to adopt an engine-created device, then a Rune app with the network editor,
-   texture and channel viewers, and a parameter inspector. Projects save to KDL.
+3. **Server and textures**: `futharkd`, the protocol and the client library, with the CLI as a client. Texture
+   operators (Constant, Ramp, Noise, Transform, Level, Composite, Shader, File In) with golden-image tests. Shared
+   frames over IOSurfaces.
+4. **Desktop app**: a Rune client with the network editor, texture viewers through shared frames, channel viewers,
+   and a parameter inspector.
 5. **Data and expressions**: tables and text, Luau expressions and binds, Channel ↔ Texture ↔ Data converters, and
    the script editor with luau-lsp IntelliSense.
 6. **3D**: the Geometry family, Shader family, Render, Camera, Light, and instancing.

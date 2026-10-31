@@ -1,0 +1,16 @@
+[package]
+name = "futhark-client"
+description = "The client library for futharkd, used by the CLI and the desktop app."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+futhark-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

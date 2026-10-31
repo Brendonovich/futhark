@@ -1,0 +1,26 @@
+[package]
+name = "futhark-server"
+description = "futharkd: the server that owns the engine, the open project and the GPU."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "futharkd"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+futhark-graph.workspace = true
+futhark-ops.workspace = true
+futhark-project.workspace = true
+futhark-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+futhark-client.workspace = true
+
+[lints]
+workspace = true

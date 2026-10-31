@@ -26,7 +26,9 @@ A TouchDesigner-style realtime node-based environment built on Rune and wgpu. Re
 - Use plain family names: Texture, Channel, Geometry, Data, Shader, Component. Never TOP, CHOP, POP, DAT, MAT, COMP
   in code or UI.
 - All GPU work goes through wgpu, and shaders are WGSL. Match Rune's wgpu version exactly.
-- The engine stays headless. UI code lives only in `apps/editor`.
+- The engine stays headless. UI code lives only in `apps/desktop`.
+- Every capability goes through the server's protocol, so the CLI, the desktop app and agents can all do it. The CLI
+  covers every method.
 - Pin every dependency to an exact version (Rune to a `rev`).
 - Tests run offline and headless.
 - A new operator goes in `crates/ops` and in `registry()`. The schema test checks its parameters.

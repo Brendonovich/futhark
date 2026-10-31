@@ -342,34 +342,34 @@ fn viewers_and_previews_share_finished_surfaces() {
     assert_eq!(message, "no operator at /nope");
 
     // Previews: two textures packed into one atlas.
-    let mut stream = previews_stream(&server, vec![node("/glow"), node("/out")]);
-    let (ring, surfaces) = loop {
-        let line = read_line(&mut stream.0);
-        if let previews::Event::Ring {
-            width,
-            height,
-            service,
-            token,
-            ..
-        } = line
-        {
-            let surfaces = futhark_surfaces::fetch(&service, &token, Duration::from_secs(2)).unwrap();
-            break ((width, height), surfaces);
-        }
+    let params = previews::Params {
+        nodes: vec![node("/glow"), node("/out")],
+        fps: None,
     };
-    assert_eq!(ring, (2048, 256));
-    let previews::Event::Frame { slot, previews, .. } = next_frame(&mut stream) else {
-        unreachable!()
-    };
-    assert_eq!(previews[0].rect, Some([0, 0, 160, 90]));
-    assert_eq!(previews[1].rect, Some([160, 0, 160, 90]));
-    let pixels = surfaces[slot.unwrap() as usize].read_bgra();
+    let mut stream = server.client().previews(params).unwrap();
+    let frame = stream.recv().unwrap().unwrap();
+    assert_eq!(frame.previews[0].rect, Some([0, 0, 160, 90]));
+    assert_eq!(frame.previews[1].rect, Some([160, 0, 160, 90]));
+    let atlas = frame.atlas.as_ref().unwrap();
+    assert_eq!((atlas.width(), atlas.height()), (2048, 256));
+    let pixels = atlas.read_bgra();
     let alpha = |x: usize, y: usize| pixels[(y * 2048 + x) * 4 + 3];
     assert_eq!(
         (alpha(200, 45), alpha(400, 45)),
         (255, 0),
         "drawn inside the rects only"
     );
+
+    // Previewing fewer nodes keeps the ring; the frame after shows only what's left.
+    stream.control().set_nodes(vec![node("/glow")]);
+    drop(frame);
+    let frame = loop {
+        let frame = stream.recv().unwrap().unwrap();
+        if frame.previews.len() == 1 {
+            break frame;
+        }
+    };
+    assert_eq!(frame.previews[0].rect, Some([0, 0, 160, 90]));
 }
 
 fn node(path: &str) -> futhark_protocol::previews::Node {

@@ -3,7 +3,7 @@
 
 mod shared;
 
-pub use shared::{FrameControl, SharedFrame, SharedFrames, Update};
+pub use shared::{FrameControl, PreviewControl, PreviewFrame, Previews, SharedFrame, SharedFrames, Update};
 
 use std::{
     fs::OpenOptions,
@@ -116,6 +116,12 @@ impl Client {
     pub fn shared_frames(mut self, params: futhark_protocol::shared::Params) -> Result<SharedFrames> {
         let started: futhark_protocol::shared::Started = self.call(Method::SharedFrames(params))?;
         Ok(SharedFrames::new(self.reader, self.writer, started.transport))
+    }
+
+    /// Turns this connection into a stream of live previews of `params.nodes`.
+    pub fn previews(mut self, params: futhark_protocol::previews::Params) -> Result<Previews> {
+        let started: futhark_protocol::shared::Started = self.call(Method::Previews(params))?;
+        Ok(Previews::new(self.reader, self.writer, started.transport))
     }
 
     fn read_line<T: DeserializeOwned>(&mut self) -> Result<T> {

@@ -323,10 +323,10 @@ Rune: pin `anomalyco/rune` to an exact `rev` on `dev`.
    offline and headless.
 2. **Graph core** (done): operators, wires, the `Params` derive, pull cooking and dirty propagation, and reading and writing
    KDL. Channel operators (Constant, LFO, Noise, Math) are the first test bed.
-3. **Server and textures**: `futharkd`, the protocol and the client library, with the CLI as a client. Texture
+3. **Server and textures** (done): `futharkd`, the protocol and the client library, with the CLI as a client. Texture
    operators (Constant, Ramp, Noise, Transform, Level, Composite, Shader, File In) with golden-image tests. Shared
    frames over IOSurfaces.
-4. **Desktop app**: a Rune client with the network editor, texture viewers through shared frames, channel viewers,
+4. **Desktop app** (first version done): a Rune client with the network editor, texture viewers through shared frames, channel viewers,
    and a parameter inspector.
 5. **Data and expressions**: tables and text, Luau expressions and binds, Channel ↔ Texture ↔ Data converters, and
    the script editor with luau-lsp IntelliSense.

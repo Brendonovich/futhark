@@ -1,0 +1,26 @@
+[workspace]
+resolver = "3"
+members = ["crates/gpu", "crates/cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/brendonovich/futhark"
+
+[workspace.dependencies]
+futhark-gpu = { path = "crates/gpu" }
+
+clap = { version = "=4.6.7", features = ["derive"] }
+pollster = "=1.0.1"
+thiserror = "=2.0.21"
+# Matches Rune's wgpu exactly, so the engine's device can be shared with the UI. Default features are off for the
+# same reason: no GL backend, and WGSL as the only shader language. Vulkan and DX12 are added per platform in
+# crates/gpu.
+wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "metal", "wgsl"] }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

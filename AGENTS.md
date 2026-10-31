@@ -3,6 +3,16 @@
 A TouchDesigner-style realtime node-based environment built on Rune and wgpu. Read `PLAN.md` for the design and
 `docs/research/touchdesigner.md` for background.
 
+## Layout
+
+- `crates/gpu`: the engine-owned wgpu context and readback.
+- `crates/cli`: the `futhark` binary.
+
+## Commands
+
+- `scripts/check`: everything CI runs (fmt, clippy, tests). Done means it passes.
+- `cargo run -p futhark -- gpu` shows the GPU adapter the engine picks.
+
 ## Rules
 
 - No legacy TouchDesigner features (no CPU surface geometry, no Tscript, no export parameter mode, no GLSL).

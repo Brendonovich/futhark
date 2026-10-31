@@ -1,0 +1,23 @@
+[package]
+name = "futhark-surfaces"
+description = "GPU surfaces the daemon shares with its clients without copying (IOSurfaces handed over Mach on macOS)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+wgpu.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+mach2.workspace = true
+objc2-core-foundation.workspace = true
+objc2-io-surface.workspace = true
+objc2-metal.workspace = true
+
+[dev-dependencies]
+futhark-gpu.workspace = true
+
+[lints]
+workspace = true

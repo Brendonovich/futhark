@@ -81,14 +81,15 @@ autocomplete, hover, signature help, type errors, go to definition, rename and s
 
 - **Definition files describe the graph API.** They cover the globals (`op`, `me`, `parent`, `time`) and a class for
   each operator type with its typed parameters.
-  - They are generated from the operator registry, so they can't drift from the code.
-  - Generation runs from the CLI and the editor.
+  - They are generated from the Pkl operator definitions, so they can't drift from the code.
 - **A sourcemap describes the operator tree.** luau-lsp's Rojo-style sourcemap is generated from the project's
   network, so `parent().noise1.par.` completes real nodes and parameters. It is regenerated when the network changes.
+  luau-lsp requires its sourcemap to be JSON, so it is written to the gitignored `.futhark/` cache and never
+  committed.
 - **In the editor**, the editor ships a luau-lsp binary at a pinned version and talks LSP to it over stdio. The
   editor draws completion popups, hover cards and diagnostics with Rune. Highlighting comes from semantic tokens.
 - **In outside editors** (VS Code, Zed, Neovim), the same definition files and sourcemap give full IntelliSense on
-  scripts checked out to disk.
+  the project's `.luau` files.
 - Paths passed as strings (`op("../noise1")`) are completed by the editor itself, because the type checker can't see
   into strings. Typed access (`parent().noise1`) is the preferred style.
 - Linking Luau's analysis library directly (in process, completions from the live graph) is a possible later step if
@@ -120,32 +121,104 @@ The engine creates the wgpu instance, adapter, device and queue, and Rune adopts
 
 ## Project files
 
-A project is a directory holding a SQLite database and a media folder:
+Projects are git-first: a directory of text files is the project. There is no binary project file and no JSON.
+Anything else on disk (caches, thumbnails, compiled shaders, an index) lives in a gitignored `.futhark/` folder and can
+always be rebuilt.
 
 ```text
-show.futhark/
-  project.db        operators, parameters, wires, components, metadata
-  media/            content-addressed files: <sha256>.<ext>
+show/
+  project.kdl          project settings: name, frame rate, realtime flag, the perform window
+  root/                the root component
+    component.kdl      its operators, parameters and wires
+    layout.kdl         node positions and sizes in the network editor
+    blur.wgsl          text content of Data operators, as real files
+    controller.luau
+    cues.tsv
+    effects/           a child component is a subfolder with the same layout
+      component.kdl
+      layout.kdl
+  media/               images, video, audio, models, fonts (Git LFS)
+  .gitattributes       generated: LFS rules for media/
+  .futhark/            gitignored cache
 ```
 
-- **The database is the source of truth for the network.**
-  - Tables cover operators (id, parent, name, type, position, flags), parameters (operator, name, mode, constant
-    value, expression, bind target), wires (from, output index, to, input index), media (hash, original name, type,
-    size) and a schema version.
-  - Saves are incremental and transactional: each edit is a small write, so autosave is free and a crash never leaves
-    a half-written project.
-  - Undo history can live in the same database.
-- **Media is normalized.** Imported files (images, video, audio, models, fonts) are copied into `media/` under their
-  content hash, so duplicates are stored once. Operators refer to media by hash, never by an absolute path, so the
-  project moves between machines intact.
-- **Unused media is collected.** Files no longer referenced by any operator are removed on save, or kept until an
-  explicit clean.
-- **Reusable components** export to the same format: a directory with its own `project.db` holding one component,
-  plus the media it uses. Import copies the media in and deduplicates by hash.
-- **Diffs.** A binary database doesn't diff in git, so the CLI can dump a project to a stable text form for review
-  (`futhark dump show.futhark`). Writing that text form is optional; the database stays canonical.
-- Scripts and shaders live in Data operators in the database. `futhark checkout` writes them out next to the
-  sourcemap for editing in outside editors, and changes are synced back.
+### Format
+
+Component files are [KDL](https://kdl.dev) v2, written in a fixed house style. The writer enforces the style, so a file
+looks the same however it was edited.
+
+```kdl
+ramp1 "texture/ramp"
+
+noise1 "texture/noise" {
+    input ramp1
+    period 4
+    amp expr="time.seconds * 0.5"
+    seed bind="../controls/seed"
+}
+
+script1 "data/text" file="controller.luau"
+```
+
+- **One fact per line.** A parameter, a wire and a flag each get their own line, so separate edits touch separate
+  lines.
+- **Fixed order.** Operators are sorted by name and parameters follow their declaration order, so saving never
+  reorders anything.
+- **Defaults are omitted.** Only parameters that differ from their default are written.
+- **Wires live on the receiving operator** as `input` lines, so connecting a wire changes one line of one operator.
+- **Layout is separate.** Node positions live in `layout.kdl`, so dragging nodes around never conflicts with real
+  edits.
+- **Text content is a real file.** Data operators holding scripts, shaders or tables point at a sibling file with its
+  natural extension (`.luau`, `.wgsl`, `.tsv`, `.md`). These files get proper diffs, highlighting and outside-editor
+  support.
+- **Components are folders.** Each component's network is its own file, so conflicts stay local to one network.
+- **Names are identities.** Operators are referenced by name and path, not by generated IDs. Files stay readable, and
+  a rename is an ordinary diff.
+
+### Working with git
+
+- **Saving writes only what changed.** Each component file is written atomically (write to a temporary file, then
+  rename).
+- **External changes reload live.** The engine watches the project directory. A `git pull`, `checkout` or a script
+  edited in another editor reloads only the components that changed, and the running network picks them up.
+- **Broken merges load anyway.** A wire or reference to a missing operator, an unknown parameter, or a type mismatch
+  becomes an error shown on that operator. The project never refuses to open.
+- **`futhark check`** validates a project headlessly (parse, references, types, expressions compile) for CI and
+  pre-commit hooks.
+- **Media** keeps human-readable paths under `media/` and is tracked with Git LFS. Operators refer to media by path
+  relative to the project.
+- **Reusable components** are just component folders. Copying one into another project, or adding it as a git
+  submodule, is how components are shared.
+- Undo history is kept in memory per session. Git is the long-term history.
+
+## Operator definitions
+
+Every operator type (its family, inputs, outputs, parameters with types, defaults, ranges, menus, labels and docs) is
+declared in [Pkl](https://pkl-lang.org), not hand-written in Rust.
+
+```pkl
+noise = new TextureOp {
+  label = "Noise"
+  inputs = 0
+  params {
+    ["period"] = new Float { default = 1; min = 0; softMax = 10 }
+    ["amp"] = new Float { default = 1 }
+    ["seed"] = new Int { default = 0 }
+    ["kind"] = new Menu { default = "perlin"; items { "perlin"; "simplex"; "worley" } }
+  }
+}
+```
+
+- **One source, many outputs.** A generator (`cargo xtask gen`) evaluates the Pkl definitions and produces:
+  - typed Rust parameter structs and the operator registry
+  - the Luau definition files for luau-lsp
+  - the reference docs
+- **Generated code is committed.** A normal `cargo build` doesn't need Pkl installed, and CI checks the generated
+  files are up to date.
+- **Pkl validates the definitions.** Schemas and constraints (`default` within `min..max`, menu defaults present in
+  `items`, unique names) catch mistakes before any Rust is generated.
+- Pkl is evaluated with the pinned `pkl` CLI, through [rpkl](https://crates.io/crates/rpkl) in the generator.
+- Custom parameters on components are project data, so they live in KDL, not Pkl.
 
 ## Architecture
 
@@ -155,7 +228,8 @@ Planned workspace:
   scheduler and the clock. No GPU code.
 - `crates/gpu`: the wgpu context, texture and buffer pools, WGSL helpers and readback.
 - `crates/ops`: the built-in operators of every family.
-- `crates/project`: the SQLite project database, the media store, and component import and export.
+- `crates/project`: reading and writing the KDL project format, the file watcher and reload, and `check`.
+- `defs/`: the Pkl operator definitions. `xtask` generates the Rust registry, Luau definitions and docs from them.
 - `crates/script`: the Luau runtime (mlua), expression compilation and evaluation, and generation of the definition
   files and sourcemap.
 - `crates/cli`: a headless runner (render a project to files, run tests).
@@ -175,7 +249,7 @@ Rune: pin `anomalyco/rune` to an exact `rev` on `dev`. Its wgpu is `~30.0.1`; ou
 3. **Textures**: Constant, Ramp, Noise, Transform, Level, Composite, Shader, and File In. Headless golden-image tests
    via readback.
 4. **Editor**: the upstream Rune change to adopt an engine-created device, then a Rune app with the network editor,
-   texture and channel viewers, and a parameter inspector. Projects save to SQLite.
+   texture and channel viewers, and a parameter inspector. Projects save to KDL.
 5. **Data and expressions**: tables and text, Luau expressions and binds, Channel ↔ Texture ↔ Data converters, and
    the script editor with luau-lsp IntelliSense.
 6. **3D**: the Geometry family, Shader family, Render, Camera, Light, and instancing.

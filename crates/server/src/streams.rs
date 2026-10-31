@@ -166,6 +166,7 @@ impl Viewer {
 
 pub struct Previewer {
     nodes: Vec<previews::Node>,
+    cells: Cells,
     fps: u32,
     rings: Rings,
     events: mpsc::Sender<previews::Event>,
@@ -184,6 +185,7 @@ impl Previewer {
     pub fn new(params: previews::Params, events: mpsc::Sender<previews::Event>) -> Self {
         Previewer {
             nodes: params.nodes,
+            cells: Cells::default(),
             fps: params.fps.unwrap_or(previews::DEFAULT_FPS),
             rings: Rings::default(),
             events,
@@ -216,19 +218,23 @@ impl Previewer {
         self.next_frame = draw.frame + interval(self.fps, draw.rate);
 
         let pictures: Vec<Picture> = self.nodes.iter().map(|node| picture(draw.engine, &node.path)).collect();
-        let sizes: Vec<Option<(u32, u32)>> = self
+        let boxes: Vec<Option<Placing<'_>>> = self
             .nodes
             .iter()
             .zip(&pictures)
             .map(|(node, picture)| match picture {
-                Picture::Texture(texture) => Some(fitted(
-                    (texture.width(), texture.height()),
-                    (node.width.clamp(1, PREVIEW_MAX), node.height.clamp(1, PREVIEW_MAX)),
-                )),
+                Picture::Texture(texture) => {
+                    let limit = (node.width.clamp(1, PREVIEW_MAX), node.height.clamp(1, PREVIEW_MAX));
+                    Some((
+                        node.path.as_str(),
+                        limit,
+                        fitted((texture.width(), texture.height()), limit),
+                    ))
+                }
                 _ => None,
             })
             .collect();
-        let (rects, atlas_height) = pack(&sizes);
+        let (rects, atlas_height) = self.cells.place(&boxes);
 
         let mut previews = Vec::with_capacity(self.nodes.len());
         let mut textures = Vec::with_capacity(self.nodes.len());
@@ -368,27 +374,56 @@ fn picture(engine: &mut Engine, path: &str) -> Picture {
     }
 }
 
-/// Packs rectangles into rows of the atlas, in order. Returns each one's place (`None` for no picture, or when it
-/// doesn't fit) and the height used.
-fn pack(sizes: &[Option<(u32, u32)>]) -> (Vec<Option<[u32; 4]>>, u32) {
-    let (mut x, mut y, mut row_height) = (0, 0, 0);
-    let rects = sizes
-        .iter()
-        .map(|size| {
-            let (width, height) = (*size)?;
-            if x + width > ATLAS_WIDTH {
-                (x, y, row_height) = (0, y + row_height, 0);
-            }
-            if y + height > ATLAS_MAX_HEIGHT {
-                return None;
-            }
-            let rect = [x, y, width, height];
-            x += width;
-            row_height = row_height.max(height);
-            Some(rect)
-        })
-        .collect();
-    (rects, y + row_height)
+/// Where each previewed operator's picture goes in the atlas: a grid of equal cells, one per operator, that an
+/// operator keeps for as long as it stays previewed at the same size. Panning adds and drops operators at the edges
+/// of the view, and with fixed cells that never moves anyone else's picture, so a client that briefly shows one
+/// frame's atlas with another frame's rectangles still crops every steady operator correctly.
+/// An operator to place: its path, the box it asked for, and its picture's size inside that box.
+type Placing<'a> = (&'a str, (u32, u32), (u32, u32));
+
+#[derive(Default)]
+struct Cells {
+    /// The size of every cell: the largest box asked for.
+    size: (u32, u32),
+    assigned: std::collections::HashMap<String, usize>,
+}
+
+impl Cells {
+    /// Places each `(path, box, picture size)`, keeping earlier placements. Returns each one's rectangle (`None` for
+    /// no picture, or when the atlas is full) and the height of the cells in use.
+    fn place(&mut self, nodes: &[Option<Placing<'_>>]) -> (Vec<Option<[u32; 4]>>, u32) {
+        let size = nodes
+            .iter()
+            .flatten()
+            .fold((1, 1), |(w, h), (_, b, _)| (w.max(b.0), h.max(b.1)));
+        if size != self.size {
+            // Every picture changes size anyway, so lay them out afresh.
+            self.size = size;
+            self.assigned.clear();
+        }
+        self.assigned
+            .retain(|path, _| nodes.iter().flatten().any(|(p, ..)| p == path));
+        let columns = (ATLAS_WIDTH / size.0).max(1) as usize;
+        let capacity = columns * (ATLAS_MAX_HEIGHT / size.1).max(1) as usize;
+        let rects = nodes
+            .iter()
+            .map(|node| {
+                let (path, _, picture) = (*node)?;
+                let index = match self.assigned.get(path) {
+                    Some(index) => *index,
+                    None => {
+                        let index = (0..capacity).find(|i| !self.assigned.values().any(|taken| taken == i))?;
+                        self.assigned.insert(path.to_string(), index);
+                        index
+                    }
+                };
+                let (column, row) = ((index % columns) as u32, (index / columns) as u32);
+                Some([column * size.0, row * size.1, picture.0, picture.1])
+            })
+            .collect();
+        let rows = self.assigned.values().map(|i| i / columns + 1).max().unwrap_or(0) as u32;
+        (rects, rows * size.1)
+    }
 }
 
 #[cfg(test)]
@@ -396,21 +431,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn packs_in_rows() {
-        let (rects, height) = pack(&[Some((1000, 100)), None, Some((1000, 50)), Some((100, 300))]);
-        assert_eq!(
-            rects,
-            [
-                Some([0, 0, 1000, 100]),
-                None,
-                Some([1000, 0, 1000, 50]),
-                Some([0, 100, 100, 300])
-            ]
-        );
-        assert_eq!(height, 400);
+    fn operators_keep_their_cells() {
+        let node = |path, picture| Some((path, (256, 144), picture));
+        let mut cells = Cells::default();
+        let (rects, height) = cells.place(&[node("/a", (256, 144)), None, node("/b", (144, 144))]);
+        assert_eq!(rects, [Some([0, 0, 256, 144]), None, Some([256, 0, 144, 144])]);
+        assert_eq!(height, 144);
 
-        let many = vec![Some((512, 512)); 40];
-        let (rects, height) = pack(&many);
+        // /a scrolls out of view and /c in: /b stays where it was, and /c takes the free cell.
+        let (rects, _) = cells.place(&[node("/b", (144, 144)), node("/c", (256, 144))]);
+        assert_eq!(rects, [Some([256, 0, 144, 144]), Some([0, 0, 256, 144])]);
+
+        // A new preview size lays everything out again.
+        let (rects, _) = cells.place(&[
+            Some(("/b", (512, 288), (288, 288))),
+            Some(("/c", (512, 288), (512, 288))),
+        ]);
+        assert_eq!(rects, [Some([0, 0, 288, 288]), Some([512, 0, 512, 288])]);
+
+        // A full atlas leaves the rest out.
+        let paths: Vec<String> = (0..40).map(|i| format!("/n{i}")).collect();
+        let many: Vec<_> = paths
+            .iter()
+            .map(|p| Some((p.as_str(), (512, 512), (512, 512))))
+            .collect();
+        let (rects, height) = Cells::default().place(&many);
         assert_eq!(rects.iter().filter(|r| r.is_some()).count(), 32);
         assert_eq!(height, ATLAS_MAX_HEIGHT);
     }

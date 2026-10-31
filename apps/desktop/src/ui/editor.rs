@@ -1,11 +1,13 @@
 //! The network editor: the current component's operators as nodes on a pannable, zoomable canvas, with wires.
 //!
-//! The world sits under one `live_offset` and `live_scale` (the camera), so panning and zooming move it without
-//! re-running the view, except when previews turn on or off.
+//! Everything is laid out in the canvas's own points: each node at its position through the camera, with its size,
+//! text, connectors and wires multiplied by the zoom, and the view rebuilt whenever the camera moves. (Rune's
+//! `live_scale` would avoid the rebuilds, but it can draw a native surface, a node's preview picture, a frame behind
+//! the rest of a zooming subtree.)
 
 use futhark_protocol::{Family, Op};
 use rune::{
-    Color, Drag, El, LineCap, MagnifyEvent, Path, Phase, PointerButton, PointerEvent, Shape, SurfaceFit, Tx,
+    Color, Drag, El, LineCap, MagnifyEvent, Path, Phase, PointerButton, PointerEvent, Shape, SurfaceFit, TextStyle, Tx,
     WheelEvent, canvas, col, el, row, text,
 };
 use rune_kit::Kit;
@@ -18,13 +20,8 @@ use crate::previews::Preview;
 
 pub fn editor(s: &App, k: &Kit) -> El {
     let nodes = s.nodes();
-    let mut world = el()
-        .key("world")
-        .absolute(0.0, 0.0)
-        .size(1.0, 1.0)
-        .origin(0.0, 0.0)
-        .live_offset(&s.live_pan)
-        .live_scale(&s.live_zoom);
+    // The camera moves the nodes, so they land where it says at once rather than springing there.
+    let mut world = el().key("world").absolute(0.0, 0.0).size(1.0, 1.0).instant_changes();
     if let Some(wires) = wires(s, &nodes) {
         world = world.child(wires);
     }
@@ -37,7 +34,7 @@ pub fn editor(s: &App, k: &Kit) -> El {
         .clip_soft(0.0)
         .fill(k.c.bg_base)
         .on_layout(|s: &mut App, r| s.set_viewport([r[2], r[3]]))
-        .on_wheel(|s: &mut App, e: WheelEvent, tx: &mut Tx| {
+        .on_wheel(|s: &mut App, e: WheelEvent, _: &mut Tx| {
             // ⌘ or Ctrl says what the user means, so only plain scrolls take part in the trackpad's gesture lock.
             let zoom = e.mods.cmd || e.mods.ctrl;
             if !zoom && !s.claim_gesture(Gesture::Pan, e.phase) {
@@ -48,30 +45,21 @@ pub fn editor(s: &App, k: &Kit) -> El {
             } else {
                 s.camera.panned([e.dx, e.dy])
             };
-            if !s.set_camera(camera) {
-                tx.live_only();
-            }
+            s.set_camera(camera);
             true
         })
-        .on_magnify(|s: &mut App, e: MagnifyEvent, tx: &mut Tx| {
+        .on_magnify(|s: &mut App, e: MagnifyEvent, _: &mut Tx| {
             if !s.claim_gesture(Gesture::Zoom, e.phase) {
                 return true;
             }
-            if !s.set_camera(s.camera.zoomed_about([e.x, e.y], 1.0 + e.delta)) {
-                tx.live_only();
-            }
+            s.set_camera(s.camera.zoomed_about([e.x, e.y], 1.0 + e.delta));
             true
         })
         .pointer_buttons([PointerButton::Primary, PointerButton::Middle])
-        .on_drag(|s: &mut App, d: &mut Drag, tx: &mut Tx| match d.phase {
-            Phase::Down => {
-                s.pan_start();
-                tx.live_only();
-            }
+        .on_drag(|s: &mut App, d: &mut Drag, _: &mut Tx| match d.phase {
+            Phase::Down => s.pan_start(),
             Phase::Move => {
-                if !s.pan_to([d.dx, d.dy]) {
-                    tx.live_only();
-                }
+                s.pan_to([d.dx, d.dy]);
             }
             Phase::Up => {
                 if d.cancelled() {
@@ -130,6 +118,11 @@ fn wires(s: &App, nodes: &[&Op]) -> Option<El> {
         let from = geometry::output_point(s.position(source));
         curves.push((geometry::wire(from, w.end), family_color(source.family).alpha(0.7)));
     }
+    let camera = s.camera;
+    let curves: Vec<_> = curves
+        .into_iter()
+        .map(|(c, color)| (c.map(|p| camera.to_screen(p)), color))
+        .collect();
     let controls: Vec<_> = curves.iter().map(|(c, _)| *c).collect();
     let b = geometry::wires_bounds(&controls)?;
     let local = |p: [f32; 2]| [p[0] - b[0], p[1] - b[1]];
@@ -137,7 +130,7 @@ fn wires(s: &App, nodes: &[&Op]) -> Option<El> {
         let path = Path::new()
             .move_to(local(c[0]))
             .cubic_to(local(c[1]), local(c[2]), local(c[3]));
-        shape.stroke_path(&path, 2.0, LineCap::Round, *color)
+        shape.stroke_path(&path, (2.0 * camera.zoom).max(1.0), LineCap::Round, *color)
     });
     Some(
         canvas(shape)
@@ -147,8 +140,20 @@ fn wires(s: &App, nodes: &[&Op]) -> Option<El> {
     )
 }
 
+/// `style` at the camera's zoom.
+fn zoomed(style: TextStyle, zoom: f32) -> TextStyle {
+    TextStyle {
+        size: style.size * zoom,
+        line_height: style.line_height * zoom,
+        tracking: style.tracking * zoom,
+        ..style
+    }
+}
+
 fn node(s: &App, k: &Kit, op: &Op) -> El {
+    let z = s.camera.zoom;
     let pos = s.position(op);
+    let screen = s.camera.to_screen(pos);
     let selected = s.selected.as_deref() == Some(op.path.as_str());
     let color = family_color(op.family);
     let path = op.path.clone();
@@ -157,30 +162,30 @@ fn node(s: &App, k: &Kit, op: &Op) -> El {
     let title = row()
         .key("title")
         .w_full()
-        .h(TITLE_H)
-        .px(6.0)
-        .gap(5.0)
+        .h(TITLE_H * z)
+        .px(6.0 * z)
+        .gap(5.0 * z)
         .center_y()
         .fill(if selected { k.c.layer_04 } else { k.c.layer_03 })
-        .child(el().size(6.0, 6.0).radius(3.0).fill(color))
+        .child(el().size(6.0 * z, 6.0 * z).radius(3.0 * z).fill(color))
         .child(
             text(network::name(&op.path).to_string())
-                .font(SMALL_MEDIUM)
+                .font(zoomed(SMALL_MEDIUM, z))
                 .color(k.c.text_base)
                 .truncate()
                 .grow(1.0)
                 .min_w(0.0),
         );
     let title = match &op.error {
-        Some(_) => title.child(text("!").font(SMALL_MEDIUM).color(k.c.danger.icon)),
+        Some(_) => title.child(text("!").font(zoomed(SMALL_MEDIUM, z)).color(k.c.danger.icon)),
         None => title,
     };
     let mut node = col()
         .key(format!("node:{}", op.path))
-        .absolute(pos[0], pos[1])
-        .size(NODE_W, NODE_H)
-        .radius(5.0)
-        .clip_rounded(5.0)
+        .absolute(screen[0], screen[1])
+        .size(NODE_W * z, NODE_H * z)
+        .radius(5.0 * z)
+        .clip_rounded(5.0 * z)
         .fill(k.c.layer_02)
         .border(
             if selected { 2.0 } else { 1.0 },
@@ -202,10 +207,10 @@ fn node(s: &App, k: &Kit, op: &Op) -> El {
     let mut group = el().key(format!("group:{}", op.path)).absolute(0.0, 0.0).child(node);
     let slots = s.input_slots(op);
     for (i, wired) in slots.iter().enumerate() {
-        let c = geometry::input_point(pos, i, slots.len());
+        let c = s.camera.to_screen(geometry::input_point(pos, i, slots.len()));
         let to = op.path.clone();
         group = group.child(
-            connector(k, c, *wired, color)
+            connector(k, c, z, *wired, color)
                 .key(format!("in:{}:{i}", op.path))
                 .on_drag(move |s: &mut App, d: &mut Drag, _: &mut Tx| match d.phase {
                     Phase::Down => s.pick_up_wire(&to, i),
@@ -218,7 +223,7 @@ fn node(s: &App, k: &Kit, op: &Op) -> El {
     if s.has_output(op) {
         let from = op.path.clone();
         group = group.child(
-            connector(k, geometry::output_point(pos), true, color)
+            connector(k, s.camera.to_screen(geometry::output_point(pos)), z, true, color)
                 .key(format!("out:{}", op.path))
                 .on_drag(move |s: &mut App, d: &mut Drag, _: &mut Tx| match d.phase {
                     Phase::Down => s.start_wire(&from),
@@ -231,10 +236,11 @@ fn node(s: &App, k: &Kit, op: &Op) -> El {
     group
 }
 
-fn connector(k: &Kit, centre: [f32; 2], filled: bool, color: Color) -> El {
-    el().absolute(centre[0] - CONNECTOR / 2.0, centre[1] - CONNECTOR / 2.0)
-        .size(CONNECTOR, CONNECTOR)
-        .radius(CONNECTOR / 2.0)
+fn connector(k: &Kit, centre: [f32; 2], zoom: f32, filled: bool, color: Color) -> El {
+    let d = CONNECTOR * zoom;
+    el().absolute(centre[0] - d / 2.0, centre[1] - d / 2.0)
+        .size(d, d)
+        .radius(d / 2.0)
         .fill(if filled { color } else { k.c.layer_02 })
         .border(1.5, color)
         .hover(k.c.hover)
@@ -242,18 +248,20 @@ fn connector(k: &Kit, centre: [f32; 2], filled: bool, color: Color) -> El {
 
 /// The preview over a node's title: its live picture or values, an error, or nothing when zoomed out.
 fn preview(s: &App, k: &Kit, op: &Op) -> El {
+    let z = s.camera.zoom;
+    let small = zoomed(SMALL, z);
     let area = col()
         .key("preview")
         .w_full()
-        .h(PREVIEW_H)
-        .padding(6.0)
-        .gap(2.0)
+        .h(PREVIEW_H * z)
+        .padding(6.0 * z)
+        .gap(2.0 * z)
         .fill(k.c.bg_deep);
     if !s.camera.shows_previews() {
         return area;
     }
     if let Some(error) = &op.error {
-        return area.child(text(error.clone()).font(SMALL).color(k.c.danger.fg).wrap().max_lines(3));
+        return area.child(text(error.clone()).font(small).color(k.c.danger.fg).wrap().max_lines(3));
     }
     if op.family == Family::Component {
         let count = s
@@ -262,7 +270,7 @@ fn preview(s: &App, k: &Kit, op: &Op) -> El {
             .map_or(0, |snapshot| network::children(snapshot, &op.path).count());
         return area.center().child(
             text(format!("{count} operator{}", if count == 1 { "" } else { "s" }))
-                .font(SMALL)
+                .font(small)
                 .color(k.c.text_faint),
         );
     }
@@ -271,12 +279,12 @@ fn preview(s: &App, k: &Kit, op: &Op) -> El {
             let shown = values.len().min(if values.len() > 3 { 2 } else { 3 });
             let mut area = area.justify_center();
             for (name, value) in &values[..shown] {
-                area = area.child(channel_row(k, name, *value, family_color(op.family)));
+                area = area.child(channel_row(k, name, *value, family_color(op.family), z));
             }
             if values.len() > shown {
                 area = area.child(
                     text(format!("+{} more", values.len() - shown))
-                        .font(SMALL)
+                        .font(small)
                         .color(k.c.text_faint),
                 );
             }
@@ -284,7 +292,7 @@ fn preview(s: &App, k: &Kit, op: &Op) -> El {
         }
         Some(Preview::Texture(rect)) => match s.previews.atlas() {
             Some(atlas) => {
-                let (picture, whole) = geometry::atlas_crop(rect, atlas.size, [NODE_W, PREVIEW_H]);
+                let (picture, whole) = geometry::atlas_crop(rect, atlas.size, [NODE_W * z, PREVIEW_H * z]);
                 area.padding(0.0).child(
                     el().key("picture")
                         .absolute(picture[0], picture[1])
@@ -302,16 +310,16 @@ fn preview(s: &App, k: &Kit, op: &Op) -> El {
         Some(Preview::Pending) => area
             .center()
             .linear_gradient(2.4, [(0.0, family_color(op.family).alpha(0.25)), (1.0, k.c.bg_deep)]),
-        Some(Preview::Error(message)) => area.child(text(message).font(SMALL).color(k.c.danger.fg).wrap().max_lines(3)),
+        Some(Preview::Error(message)) => area.child(text(message).font(small).color(k.c.danger.fg).wrap().max_lines(3)),
         None => area,
     }
 }
 
 /// A channel's name and value over a thin bar from the middle (zero) toward ±1.
-fn channel_row(k: &Kit, name: &str, value: f32, color: Color) -> El {
-    const BAR_W: f32 = NODE_W - 12.0;
+fn channel_row(k: &Kit, name: &str, value: f32, color: Color, z: f32) -> El {
+    let bar_w = (NODE_W - 12.0) * z;
     let v = value.clamp(-1.0, 1.0);
-    let half = BAR_W / 2.0;
+    let half = bar_w / 2.0;
     let (left, width) = if v >= 0.0 {
         (half, v * half)
     } else {
@@ -322,23 +330,27 @@ fn channel_row(k: &Kit, name: &str, value: f32, color: Color) -> El {
         .child(
             row()
                 .w_full()
-                .h(12.0)
-                .gap(4.0)
+                .h(12.0 * z)
+                .gap(4.0 * z)
                 .center_y()
                 .child(
                     text(name.to_string())
-                        .font(SMALL)
+                        .font(zoomed(SMALL, z))
                         .color(k.c.text_muted)
                         .truncate()
                         .grow(1.0)
                         .min_w(0.0),
                 )
-                .child(text(format!("{value:.3}")).font(super::MONO).color(k.c.text_base)),
+                .child(
+                    text(format!("{value:.3}"))
+                        .font(zoomed(super::MONO, z))
+                        .color(k.c.text_base),
+                ),
         )
         .child(
-            el().w(BAR_W)
-                .h(2.0)
+            el().w(bar_w)
+                .h(2.0 * z)
                 .fill(k.c.layer_03)
-                .child(el().absolute(left, 0.0).size(width.max(1.0), 2.0).fill(color)),
+                .child(el().absolute(left, 0.0).size((width).max(z), 2.0 * z).fill(color)),
         )
 }

@@ -6,7 +6,7 @@ use std::{cell::Cell, collections::HashMap, path::PathBuf};
 
 use futhark_protocol::{Edit, Family, Hello, Op, OpType, ParamKind, ParamType, Snapshot, Value};
 
-use rune::{GesturePhase, Live, TextEdit};
+use rune::{GesturePhase, TextEdit};
 
 use crate::{
     geometry::{self, Camera, Target},
@@ -71,8 +71,6 @@ pub struct App {
     /// An operator just added, selected once a snapshot has it.
     pending_select: Option<String>,
     pub camera: Camera,
-    pub live_pan: Live<[f32; 2]>,
-    pub live_zoom: Live<f32>,
     /// The canvas's size in points, once laid out.
     pub viewport: [f32; 2],
     /// Device pixels per point, as the view last saw.
@@ -124,8 +122,6 @@ impl App {
             selected: None,
             pending_select: None,
             camera,
-            live_pan: Live::new(camera.pan),
-            live_zoom: Live::new(camera.zoom),
             viewport: [0.0, 0.0],
             scale: Cell::new(2.0),
             frame_pending: true,
@@ -362,8 +358,6 @@ impl App {
     pub fn set_camera(&mut self, camera: Camera) -> bool {
         let previews_changed = camera.shows_previews() != self.camera.shows_previews();
         self.camera = camera;
-        self.live_pan.set(camera.pan);
-        self.live_zoom.set(camera.zoom);
         self.update_previews();
         previews_changed
     }

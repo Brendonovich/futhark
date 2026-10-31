@@ -14,9 +14,35 @@ futhark-graph = { path = "crates/graph" }
 futhark-macros = { path = "crates/macros" }
 futhark-ops = { path = "crates/ops" }
 futhark-project = { path = "crates/project" }
+futhark-surfaces = { path = "crates/surfaces" }
 
 clap = { version = "=4.6.7", features = ["derive"] }
 kdl = { version = "=6.7.1", default-features = false }
+# The Mach calls that hand IOSurfaces between processes (macOS only).
+mach2 = "=0.6.0"
+# The objc2 bindings at the versions wgpu's Metal backend already builds, so the tree has one copy of each.
+objc2-core-foundation = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "CFBase",
+    "CFDictionary",
+    "CFNumber",
+    "CFString",
+] }
+objc2-io-surface = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "IOSurfaceRef",
+    "IOSurfaceTypes",
+    "libc",
+    "objc2-core-foundation",
+] }
+objc2-metal = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "MTLDevice",
+    "MTLPixelFormat",
+    "MTLResource",
+    "MTLTexture",
+    "objc2-io-surface",
+] }
 pollster = "=1.0.1"
 proc-macro2 = "=1.0.107"
 quote = "=1.0.47"

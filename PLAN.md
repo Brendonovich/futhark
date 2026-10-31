@@ -52,6 +52,23 @@ Each operator belongs to one family, and the family decides what flows along its
 - Cooking starts single-threaded on the main thread. The graph should be built so independent branches can later cook
   in parallel; nothing global or mutable is reachable from an operator's cook.
 
+## Expressions and scripting
+
+[Rhai](https://rhai.rs) is used for both parameter expressions and scripting (callbacks, script operators).
+
+- **Expressions are compiled once.** Each expression is compiled to an AST when it is edited and re-evaluated on
+  cook. Its result is cached until one of its dependencies changes.
+- **Simple expressions skip the interpreter.** Constants, a bare parameter or channel reference, and basic arithmetic
+  on those are recognised up front and run on a native path. This is the same trick as TouchDesigner's "optimized"
+  expressions.
+- **Dependencies are captured through accessors.** The graph is exposed to Rhai through registered functions (`op`,
+  `parent`, `me`, `time`, parameter and channel access). Each call records a dependency for the operator being
+  cooked.
+- **Scripts are sandboxed by default.** Engines get operation and call-depth limits and no filesystem access.
+  Imports are allowed only from Data operators in the project.
+- The `sync` feature is enabled so a compiled script can move between threads once cooking goes parallel.
+- GPU work stays in WGSL. Rhai never runs per pixel or per point.
+
 ## Rendering
 
 - Texture operators record into a shared `wgpu::CommandEncoder` per frame, drawing from a pool of textures keyed by
@@ -96,8 +113,6 @@ Rune: pin `anomalyco/rune` to an exact `rev` on `dev`. Its wgpu is `~30.0.1`; ou
 
 ## Open questions
 
-- **Expression and scripting language.** Embedding Python is heavy. Options are a small built-in expression language
-  for parameters plus WGSL for GPU work, or an embedded language (Lua, Rhai, JS) for scripting.
 - **Device ownership.** Either the engine creates the device and Rune adopts it, or the engine takes Rune's `Gpu`.
   The second works today through the compositor hook. The first is needed to run headless and windowed with the same
   code.

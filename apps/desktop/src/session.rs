@@ -60,7 +60,12 @@ impl Session {
             .spawn(move || {
                 let out = Outbox { tx: outbox, wake };
                 match Client::connect_or_launch_at(&socket) {
-                    Ok(client) => Worker::new(client, out, inbox, to_self).run(&socket, open),
+                    Ok(client) => {
+                        if let Some(stale) = client.stale() {
+                            out.send(Reply::Error(stale.to_string()));
+                        }
+                        Worker::new(client, out, inbox, to_self).run(&socket, open)
+                    }
                     Err(error) => out.send(Reply::Disconnected(error.to_string())),
                 }
             })

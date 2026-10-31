@@ -74,6 +74,7 @@ pub fn spawn() -> (Handle, thread::JoinHandle<()>) {
                 previewers: HashMap::new(),
                 next_stream: 1,
                 quit: false,
+                executable: executable(),
             };
             while !core.quit {
                 match queue.recv_timeout(core.until_next_frame()) {
@@ -104,6 +105,8 @@ pub struct Core {
     previewers: HashMap<u64, Previewer>,
     next_stream: u64,
     quit: bool,
+    /// This server's executable and its modification time when it started, for clients to spot an older build.
+    executable: Option<(String, Option<u64>)>,
 }
 
 struct OpenProject {
@@ -113,6 +116,8 @@ struct OpenProject {
     engine: Engine,
     /// When frame 0 was, for the realtime clock.
     started: Instant,
+    /// The network's revision when it was last loaded or saved.
+    saved: u64,
 }
 
 impl OpenProject {
@@ -256,6 +261,10 @@ impl Core {
         Status {
             project: self.open.as_ref().map(OpenProject::info),
             frame: self.open.as_ref().map_or(0, |open| open.engine.clock().frame),
+            unsaved: self
+                .open
+                .as_ref()
+                .is_some_and(|open| open.engine.network().revision() != open.saved),
         }
     }
 
@@ -275,6 +284,8 @@ impl Core {
                     .shared_transport()
                     .map(|transport| vec![format!("shared-frames:{transport}"), format!("previews:{transport}")])
                     .unwrap_or_default(),
+                executable: self.executable.as_ref().map(|(path, _)| path.clone()),
+                executable_modified: self.executable.as_ref().and_then(|(_, modified)| *modified),
             }),
             Method::Status => to_value(&self.status()),
             Method::Create(params) => to_value(&self.create(params)?),
@@ -283,6 +294,7 @@ impl Core {
                 let open = self.open_project()?;
                 futhark_project::write(&open.dir, &open.name, open.rate, open.engine.network())
                     .map_err(|e| RpcError::failed(e.to_string()))?;
+                open.saved = open.engine.network().revision();
                 let project = open.info();
                 self.emit(Event::ProjectSaved { project });
                 serde_json::Value::Null
@@ -338,6 +350,7 @@ impl Core {
             dir,
             name: project.name,
             rate: project.rate,
+            saved: engine.network().revision(),
             engine,
             started: Instant::now(),
         };
@@ -424,6 +437,13 @@ impl Core {
             },
         })
     }
+}
+
+/// The running executable and when it was last modified, in milliseconds since the Unix epoch.
+fn executable() -> Option<(String, Option<u64>)> {
+    let path = std::env::current_exe().ok()?.canonicalize().ok()?;
+    let modified = futhark_protocol::modified_millis(&path);
+    Some((path.to_string_lossy().into_owned(), modified))
 }
 
 fn absolute(path: &str) -> Result<PathBuf, RpcError> {

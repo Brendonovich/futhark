@@ -21,6 +21,13 @@ pub fn socket_path() -> PathBuf {
     state_dir().join("futharkd.sock")
 }
 
+/// When `path` was last modified, in milliseconds since the Unix epoch: how a server's build is identified in
+/// [`Hello`].
+pub fn modified_millis(path: &std::path::Path) -> Option<u64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    Some(modified.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as u64)
+}
+
 /// The directory for the server's socket and log.
 pub fn state_dir() -> PathBuf {
     let home = std::env::var_os("HOME").map(PathBuf::from);
@@ -203,12 +210,22 @@ pub struct Hello {
     pub version: String,
     /// Optional features, such as `shared-frames:iosurface-mach`.
     pub capabilities: Vec<String>,
+    /// The server's executable, absolute, and when it was last modified as the server started (milliseconds since
+    /// the Unix epoch). A client that would launch the same file, and finds it modified since, knows the server is
+    /// an older build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable_modified: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Status {
     pub project: Option<ProjectInfo>,
     pub frame: i64,
+    /// The open project has changes that aren't saved.
+    #[serde(default)]
+    pub unsaved: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

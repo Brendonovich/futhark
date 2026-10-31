@@ -138,7 +138,11 @@ fn connect(cli_socket: &Option<PathBuf>, launch: bool) -> Result<Client, String>
     } else {
         Client::connect(&socket)
     };
-    client.map_err(|e| e.to_string())
+    let client = client.map_err(|e| e.to_string())?;
+    if let Some(stale) = client.stale() {
+        eprintln!("warning: {stale}");
+    }
+    Ok(client)
 }
 
 fn edit(cli: &Cli, edit: Edit) -> Result<(), String> {

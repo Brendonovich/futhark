@@ -22,7 +22,8 @@ use futhark_protocol::{
 use serde::de::DeserializeOwned;
 
 /// How long `connect_or_launch` waits for a server it started.
-const LAUNCH_TIMEOUT: Duration = Duration::from_secs(5);
+/// Generous, because macOS scans a freshly built executable the first time it runs.
+const LAUNCH_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -44,6 +45,7 @@ pub struct Client {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
     next_id: u64,
+    stale: Option<String>,
 }
 
 impl Client {
@@ -56,6 +58,7 @@ impl Client {
             reader: BufReader::new(stream.try_clone()?),
             writer: stream,
             next_id: 1,
+            stale: None,
         })
     }
 
@@ -64,24 +67,65 @@ impl Client {
         Self::connect(&socket_path())
     }
 
-    /// Connects to the local server, starting it if nothing answers.
+    /// Connects to the local server, starting it if nothing answers, and restarting it if it is an older build
+    /// (see [`connect_or_launch_with`](Self::connect_or_launch_with)).
     pub fn connect_or_launch() -> Result<Self> {
         Self::connect_or_launch_at(&socket_path())
     }
 
     pub fn connect_or_launch_at(path: &Path) -> Result<Self> {
-        if let Ok(client) = Self::connect(path) {
+        match daemon_path() {
+            Ok(daemon) => Self::connect_or_launch_with(path, &daemon),
+            // No server to launch: use whatever answers.
+            Err(error) => Self::connect(path).map_err(|_| error),
+        }
+    }
+
+    /// Connects to the server at `socket`, starting `daemon` if nothing answers.
+    ///
+    /// A server that is an older build than `daemon` (the same file, modified since the server started), or that
+    /// speaks another protocol, is restarted, and the project it had open is opened again. If that project has
+    /// unsaved changes the server is left running, since restarting would lose them, and [`stale`](Self::stale)
+    /// says why.
+    pub fn connect_or_launch_with(socket: &Path, daemon: &Path) -> Result<Self> {
+        let mut client = match Self::connect(socket) {
+            Ok(client) => client,
+            Err(_) => {
+                launch(socket, daemon)?;
+                return wait_for(socket);
+            }
+        };
+        let Some(reason) = staleness(&client.hello()?, daemon) else {
+            return Ok(client);
+        };
+        let status = client.status()?;
+        if status.unsaved {
+            client.stale = Some(format!(
+                "futharkd is {reason}, but its project has unsaved changes: save them, then restart it with \
+                 `futhark shutdown`"
+            ));
             return Ok(client);
         }
-        launch(path)?;
+        client.shutdown()?;
+        drop(client);
         let deadline = Instant::now() + LAUNCH_TIMEOUT;
-        loop {
-            match Self::connect(path) {
-                Ok(client) => return Ok(client),
-                Err(error) if Instant::now() > deadline => return Err(error),
-                Err(_) => thread::sleep(Duration::from_millis(25)),
+        while Self::connect(socket).is_ok() {
+            if Instant::now() > deadline {
+                return Err(ClientError::Launch("the old futharkd didn't stop".into()));
             }
+            thread::sleep(Duration::from_millis(25));
         }
+        launch(socket, daemon)?;
+        let mut client = wait_for(socket)?;
+        if let Some(project) = status.project {
+            client.open(Path::new(&project.path))?;
+        }
+        Ok(client)
+    }
+
+    /// Why the server this client found is out of date, when it couldn't be restarted.
+    pub fn stale(&self) -> Option<&str> {
+        self.stale.as_deref()
     }
 
     /// Calls a method and decodes its result.
@@ -224,16 +268,42 @@ fn daemon_path() -> Result<PathBuf> {
         .ok_or_else(|| ClientError::Launch(format!("no futharkd next to {}; set FUTHARK_DAEMON", exe.display())))
 }
 
-/// Starts the server detached, in its own process group, logging to `futharkd.log` in the state directory.
-fn launch(socket: &Path) -> Result<()> {
-    let daemon = daemon_path()?;
-    let dir = state_dir();
+/// Why a server that said `hello` is out of date compared with `daemon`, if it is.
+fn staleness(hello: &Hello, daemon: &Path) -> Option<String> {
+    if hello.protocol != futhark_protocol::PROTOCOL {
+        return Some(format!(
+            "speaking protocol {}, not {}",
+            hello.protocol,
+            futhark_protocol::PROTOCOL
+        ));
+    }
+    let daemon = daemon.canonicalize().ok()?;
+    let same_file = hello.executable.as_deref() == Some(daemon.to_str()?);
+    (same_file && hello.executable_modified != futhark_protocol::modified_millis(&daemon))
+        .then(|| format!("an older build than {}", daemon.display()))
+}
+
+/// Waits for a server that was just started to answer.
+fn wait_for(socket: &Path) -> Result<Client> {
+    let deadline = Instant::now() + LAUNCH_TIMEOUT;
+    loop {
+        match Client::connect(socket) {
+            Ok(client) => return Ok(client),
+            Err(error) if Instant::now() > deadline => return Err(error),
+            Err(_) => thread::sleep(Duration::from_millis(25)),
+        }
+    }
+}
+
+/// Starts the server detached, in its own process group, logging to `futharkd.log` beside its socket.
+fn launch(socket: &Path, daemon: &Path) -> Result<()> {
+    let dir = socket.parent().map_or_else(state_dir, Path::to_path_buf);
     std::fs::create_dir_all(&dir)?;
     let log = OpenOptions::new()
         .create(true)
         .append(true)
         .open(dir.join("futharkd.log"))?;
-    let mut child = Command::new(&daemon)
+    let mut child = Command::new(daemon)
         .arg("--socket")
         .arg(socket)
         .stdin(Stdio::null())

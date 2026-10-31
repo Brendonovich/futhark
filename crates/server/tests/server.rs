@@ -437,3 +437,69 @@ fn closing_a_still_viewer_ends_it() {
     control.close();
     assert!(waiting.join().unwrap(), "recv returns None once closed");
 }
+
+#[test]
+fn clients_restart_an_older_build() {
+    let dir = std::env::temp_dir().join(format!("futhark-server-{}-stale", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    // A copy of the server binary stands in for the one a developer rebuilds. A rebuild is simulated as a linker
+    // does it: the bytes written to a new file, which gets a new modification time, renamed over the old one.
+    // (Setting the time some other way can get the next launch killed by macOS.)
+    let daemon = dir.join("futharkd");
+    let build = || {
+        thread::sleep(Duration::from_millis(20));
+        let fresh = dir.join("futharkd.new");
+        let mut from = fs::File::open(env!("CARGO_BIN_EXE_futharkd")).unwrap();
+        let mut to = fs::File::create(&fresh).unwrap();
+        std::io::copy(&mut from, &mut to).unwrap();
+        drop(to);
+        fs::set_permissions(&fresh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        fs::rename(&fresh, &daemon).unwrap();
+    };
+    build();
+    let socket = dir.join("s.sock");
+    let project = dir.join("hello");
+    copy(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/hello"),
+        &project,
+    );
+
+    let mut client = Client::connect_or_launch_with(&socket, &daemon).unwrap();
+    let first = client.hello().unwrap();
+    assert_eq!(first.executable.as_deref(), daemon.canonicalize().unwrap().to_str());
+    client.open(&project).unwrap();
+
+    // Rebuilt: the next client restarts the server and opens the project again.
+    build();
+    let mut client = Client::connect_or_launch_with(&socket, &daemon).unwrap();
+    assert_eq!(client.stale(), None);
+    let second = client.hello().unwrap();
+    assert_ne!(second.executable_modified, first.executable_modified);
+    let status = client.status().unwrap();
+    assert_eq!(status.project.map(|p| p.name), Some("hello".to_string()));
+    assert!(!status.unsaved);
+
+    // Rebuilt again, but with unsaved changes: the server stays, and the client says why.
+    client
+        .edit(
+            None,
+            vec![Edit::Add {
+                path: "/c".into(),
+                ty: "channel/constant".into(),
+            }],
+        )
+        .unwrap();
+    assert!(client.status().unwrap().unsaved);
+    build();
+    let mut client = Client::connect_or_launch_with(&socket, &daemon).unwrap();
+    assert!(
+        client.stale().unwrap().contains("unsaved changes"),
+        "{:?}",
+        client.stale()
+    );
+    assert_eq!(client.hello().unwrap().executable_modified, second.executable_modified);
+
+    client.shutdown().unwrap();
+    let _ = fs::remove_dir_all(&dir);
+}

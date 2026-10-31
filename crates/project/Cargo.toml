@@ -1,0 +1,18 @@
+[package]
+name = "futhark-project"
+description = "Reads and writes projects: a directory of KDL files, one component per folder."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+futhark-graph.workspace = true
+kdl.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+futhark-ops.workspace = true
+
+[lints]
+workspace = true

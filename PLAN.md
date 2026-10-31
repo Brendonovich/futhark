@@ -197,24 +197,35 @@ Rust is the single source of truth for operator types. Each operator type is a R
 struct with a derive:
 
 ```rust
-/// Fractal noise.
 #[derive(Params)]
-pub struct NoiseParams {
-    /// Size of the noise features, in UV units.
+pub struct LfoParams {
+    pub wave: Wave, // a #[derive(Menu)] enum
+    /// Cycles per second.
     #[param(default = 1.0, min = 0.0, soft_max = 10.0)]
-    pub period: f32,
-    #[param(default = 1.0)]
-    pub amp: f32,
-    pub seed: i32,
-    pub kind: NoiseKind, // a #[derive(Menu)] enum
+    pub frequency: f64,
+    #[param(default = "chan1")]
+    pub name: String,
 }
 
-impl TextureOp for Noise {
-    type Params = NoiseParams;
-    const SPEC: OpSpec = OpSpec { name: "texture/noise", label: "Noise", inputs: 0..=0 };
-    fn cook(&mut self, cx: &mut TextureCx, params: &NoiseParams) -> Result<(), CookError> { ... }
+#[derive(Default)]
+pub struct Lfo;
+
+impl ChannelOp for Lfo {
+    type Params = LfoParams;
+    const SPEC: OpSpec = OpSpec {
+        name: "channel/lfo",
+        label: "LFO",
+        doc: "A repeating wave over time, one sample per frame.",
+        inputs: 0..=0,
+        time_dependent: true,
+    };
+
+    fn cook(&mut self, cx: &ChannelCx<'_>, params: &LfoParams) -> Result<Channels, CookError> { ... }
 }
 ```
+
+Each family has its own operator trait (`ChannelOp` now; `TextureOp` and the others as they arrive) with a context
+suited to it. The registry erases the family so the engine cooks every operator the same way.
 
 - **The derive produces a static parameter schema** from the struct: name, type, default, range, menu items, label,
   and docs taken from doc comments. The engine, the editor's inspector, the KDL reader and writer, and Luau all read
@@ -250,9 +261,9 @@ Rune: pin `anomalyco/rune` to an exact `rev` on `dev`. Its wgpu is `~30.0.1`; ou
 
 ## Milestones
 
-1. **Skeleton**: the workspace, the engine-owned headless wgpu context, the `futhark` CLI, and CI that runs tests
+1. **Skeleton** (done): the workspace, the engine-owned headless wgpu context, the `futhark` CLI, and CI that runs tests
    offline and headless.
-2. **Graph core**: operators, wires, the `Params` derive, pull cooking and dirty propagation, and reading and writing
+2. **Graph core** (done): operators, wires, the `Params` derive, pull cooking and dirty propagation, and reading and writing
    KDL. Channel operators (Constant, LFO, Noise, Math) are the first test bed.
 3. **Textures**: Constant, Ramp, Noise, Transform, Level, Composite, Shader, and File In. Headless golden-image tests
    via readback.

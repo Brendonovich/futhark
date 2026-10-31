@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/gpu", "crates/cli"]
+members = ["crates/*"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,9 +10,18 @@ repository = "https://github.com/brendonovich/futhark"
 
 [workspace.dependencies]
 futhark-gpu = { path = "crates/gpu" }
+futhark-graph = { path = "crates/graph" }
+futhark-macros = { path = "crates/macros" }
+futhark-ops = { path = "crates/ops" }
+futhark-project = { path = "crates/project" }
 
 clap = { version = "=4.6.7", features = ["derive"] }
+kdl = { version = "=6.7.1", default-features = false }
 pollster = "=1.0.1"
+proc-macro2 = "=1.0.107"
+quote = "=1.0.47"
+# syn 2 rather than 3: clap's derive already builds syn 2, so the tree has one copy.
+syn = { version = "=2.0.119", features = ["full"] }
 thiserror = "=2.0.21"
 # Matches Rune's wgpu exactly, so the engine's device can be shared with the UI. Default features are off for the
 # same reason: no GL backend, and WGSL as the only shader language. Vulkan and DX12 are added per platform in

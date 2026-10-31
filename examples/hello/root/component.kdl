@@ -1,0 +1,17 @@
+fx "component/base"
+
+lfo1 "channel/lfo" {
+    frequency 0.5
+}
+
+mix "channel/math" {
+    input lfo1
+    input noise1
+    gain 0.5
+}
+
+noise1 "channel/noise" {
+    seed 3
+    octaves 2
+    amplitude 0.25
+}

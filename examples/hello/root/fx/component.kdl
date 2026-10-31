@@ -1,0 +1,5 @@
+wobble "channel/lfo" {
+    wave triangle
+    frequency 2.0
+    name "wobble"
+}

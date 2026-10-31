@@ -157,6 +157,14 @@ How the desktop app sees viewers (`crates/surfaces`):
 - **A slow client only stalls its own viewer.** When every slot is held the server skips that viewer's frames.
 - **The client shows a slot without copying**: Rune wraps the IOSurface (`PixelBuffer::from_iosurface`) and draws it
   in a `NativeSurface`.
+- **Node previews share one ring.** Every visible node in the network editor shows a live preview, as in
+  TouchDesigner, so a ring per node would cost a connection and four surfaces each. Instead `previews` takes the
+  list of nodes the client can see, with a size for each. The server packs their pictures into one atlas surface per
+  slot and announces each frame with the rectangle of every node. Channel and Data nodes come in the same message as
+  values (latest samples, the first rows of a table). The list changes as the user pans and zooms. Previews run at a
+  lower rate than the focused viewer, and a node that is off screen or too small isn't previewed.
+- **Previewing a node pulls it.** As in TouchDesigner, a visible preview is a reason to cook, so the server pulls
+  exactly the nodes being previewed or viewed. Nodes nobody looks at and nothing downstream needs don't cook.
 - **Other platforms and remote clients** get encoded frames (H.264, or still images to start) instead. D3D12 shared
   handles on Windows can come later.
 

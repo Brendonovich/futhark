@@ -81,12 +81,13 @@ impl Camera {
         a[0] < size[0] && a[1] < size[1] && b[0] > 0.0 && b[1] > 0.0
     }
 
-    /// A node's preview size in device pixels at this zoom, for a display of `scale` pixels per point. The width
-    /// rounds up to a multiple of 32, so a pinch asks the server for new sizes now and then rather than every frame.
+    /// A node's preview size in device pixels at this zoom, for a display of `scale` pixels per point. The width is
+    /// a power of two from 64 to 512, so zooming asks the server for new sizes (and a re-packed atlas) only when
+    /// the zoom doubles or halves, not on every step of a pinch.
     pub fn preview_pixels(&self, scale: f32) -> [u32; 2] {
-        const STEP: f32 = 32.0;
-        let w = ((NODE_W * self.zoom * scale) / STEP).ceil().max(1.0) * STEP;
-        [w as u32, (w * PREVIEW_H / NODE_W).round() as u32]
+        let needed = (NODE_W * self.zoom * scale).ceil().max(1.0) as u32;
+        let w = needed.next_power_of_two().clamp(64, 512);
+        [w, (w as f32 * PREVIEW_H / NODE_W).round() as u32]
     }
 }
 
@@ -240,13 +241,16 @@ mod tests {
         assert!(cam.sees(node_rect([-50.0, 10.0]), size), "partly showing");
         assert!(!cam.sees(node_rect([500.0, 10.0]), size));
         assert!(!cam.sees(node_rect([10.0, -200.0]), size));
-        assert_eq!(cam.preview_pixels(2.0), [224, 125]);
-        assert_eq!(
-            cam.zoomed_about([0.0, 0.0], 1.05).preview_pixels(2.0),
-            [224, 125],
-            "small zooms ask for nothing new"
-        );
-        assert_eq!(cam.zoomed_about([0.0, 0.0], 0.1).preview_pixels(1.0), [32, 18]);
+        assert_eq!(cam.preview_pixels(2.0), [256, 143]);
+        for zoom in [1.05, 1.2, 1.28] {
+            assert_eq!(
+                cam.zoomed_about([0.0, 0.0], zoom).preview_pixels(2.0),
+                [256, 143],
+                "zooming within a doubling asks for nothing new"
+            );
+        }
+        assert_eq!(cam.zoomed_about([0.0, 0.0], 1.3).preview_pixels(2.0), [512, 287]);
+        assert_eq!(cam.zoomed_about([0.0, 0.0], 0.1).preview_pixels(1.0), [64, 36]);
         let far = cam.zoomed_about([0.0, 0.0], 0.4);
         assert!(!far.shows_previews());
         assert!(cam.shows_previews());

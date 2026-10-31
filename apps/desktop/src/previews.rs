@@ -69,8 +69,9 @@ pub trait PreviewSource {
     fn set_visible(&mut self, requests: Vec<PreviewRequest>);
     fn get(&self, path: &str) -> Option<Preview>;
     fn atlas(&self) -> Option<Atlas>;
-    /// Whether any preview changed since the last call. New atlas pixels alone don't count: the surface redraws
-    /// itself.
+    /// Applies what arrived since the last call, and says whether the view needs rebuilding. Called on the UI
+    /// thread before the view is built, so a frame's atlas pixels and its rectangles show together. New pixels alone
+    /// don't need a rebuild: the surface redraws itself.
     fn take_changed(&self) -> bool;
 }
 
@@ -80,6 +81,11 @@ struct Shared {
     previews: HashMap<String, Preview>,
     atlas_size: Option<[u32; 2]>,
     control: Option<PreviewControl>,
+    /// The newest frame, not yet shown. A newer one replaces it, handing its atlas back to the server.
+    pending: Option<PreviewFrame>,
+    /// The frame on screen and the one before, which the GPU may still be reading: dropping a frame hands its atlas
+    /// back to the server.
+    held: VecDeque<PreviewFrame>,
 }
 
 fn lock(shared: &Mutex<Shared>) -> std::sync::MutexGuard<'_, Shared> {
@@ -161,8 +167,47 @@ impl PreviewSource for StreamPreviews {
     }
 
     fn take_changed(&self) -> bool {
-        self.changed.swap(false, Ordering::Relaxed)
+        let mut changed = self.changed.swap(false, Ordering::Relaxed);
+        let mut shared = lock(&self.shared);
+        if let Some(frame) = shared.pending.take() {
+            changed |= show(&mut shared, &self.surface, frame);
+        }
+        changed
     }
+}
+
+/// Shows `frame`: its atlas goes into the surface and its previews into `shared`, both now, on the UI thread, so
+/// nodes never crop one frame's atlas with another frame's rectangles. True when the view needs rebuilding.
+fn show(shared: &mut Shared, surface: &NativeSurface, frame: PreviewFrame) -> bool {
+    let mut changed = false;
+    if let Some(atlas) = &frame.atlas {
+        if let Err(error) = crate::frames::push(surface, atlas, frame.frame) {
+            for preview in shared.previews.values_mut() {
+                *preview = Preview::Error(error.clone());
+            }
+            return true;
+        }
+        let size = Some([atlas.width(), atlas.height()]);
+        if shared.atlas_size != size {
+            shared.atlas_size = size;
+            changed = true;
+        }
+    }
+    for p in &frame.previews {
+        if !shared.nodes.iter().any(|n| n.path == p.path) {
+            continue;
+        }
+        let preview = Preview::from_protocol(p);
+        if shared.previews.get(&p.path) != Some(&preview) {
+            shared.previews.insert(p.path.clone(), preview);
+            changed = true;
+        }
+    }
+    shared.held.push_back(frame);
+    if shared.held.len() > 2 {
+        shared.held.pop_front();
+    }
+    changed
 }
 
 /// The thread behind [`StreamPreviews`]: keeps one stream open while there is anything to preview, reconnecting if
@@ -207,17 +252,11 @@ impl Stream {
             }
             shared.control = Some(stream.control());
         }
-        // The frame on screen and the one before, which the GPU may still be reading: dropping a frame hands its
-        // atlas back to the server.
-        let mut held: VecDeque<PreviewFrame> = VecDeque::with_capacity(3);
         while !self.stop.load(Ordering::Relaxed) {
             match stream.recv() {
                 Ok(Some(frame)) => {
-                    self.show(&frame);
-                    held.push_back(frame);
-                    if held.len() > 2 {
-                        held.pop_front();
-                    }
+                    lock(&self.shared).pending = Some(frame);
+                    (self.wake)();
                 }
                 Ok(None) => break,
                 Err(error) => {
@@ -226,40 +265,11 @@ impl Stream {
                 }
             }
         }
-        lock(&self.shared).control = None;
-        self.surface.clear();
-        drop(held);
-    }
-
-    fn show(&self, frame: &PreviewFrame) {
-        let mut atlas_size = None;
-        if let Some(atlas) = &frame.atlas {
-            match crate::frames::push(&self.surface, atlas, frame.frame) {
-                Ok(()) => atlas_size = Some([atlas.width(), atlas.height()]),
-                Err(error) => return self.fail(&error),
-            }
-        }
         let mut shared = lock(&self.shared);
-        let mut changed = false;
-        if atlas_size.is_some() && shared.atlas_size != atlas_size {
-            shared.atlas_size = atlas_size;
-            changed = true;
-        }
-        for p in &frame.previews {
-            if !shared.nodes.iter().any(|n| n.path == p.path) {
-                continue;
-            }
-            let preview = Preview::from_protocol(p);
-            if shared.previews.get(&p.path) != Some(&preview) {
-                shared.previews.insert(p.path.clone(), preview);
-                changed = true;
-            }
-        }
-        drop(shared);
-        if changed {
-            self.changed.store(true, Ordering::Relaxed);
-            (self.wake)();
-        }
+        shared.control = None;
+        shared.pending = None;
+        self.surface.clear();
+        shared.held.clear();
     }
 
     /// Shows `message` on every node that has nothing better.

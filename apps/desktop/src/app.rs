@@ -5,7 +5,8 @@
 use std::{cell::Cell, collections::HashMap, path::PathBuf};
 
 use futhark_protocol::{Edit, Family, Hello, Op, OpType, ParamKind, ParamType, Snapshot, Value};
-use rune::{Live, TextEdit};
+
+use rune::{GesturePhase, Live, TextEdit};
 
 use crate::{
     geometry::{self, Camera, Target},
@@ -81,6 +82,8 @@ pub struct App {
     pub node_drag: Option<NodeDrag>,
     pub wire_drag: Option<WireDrag>,
     pan_at_press: [f32; 2],
+    /// Which way the trackpad gesture in progress moves the camera, and when it last did.
+    gesture: Option<(Gesture, std::time::Instant)>,
     pub previews: Box<dyn PreviewSource>,
     visible: Vec<PreviewRequest>,
     pub viewer: Option<Viewer>,
@@ -129,6 +132,7 @@ impl App {
             node_drag: None,
             wire_drag: None,
             pan_at_press: [0.0, 0.0],
+            gesture: None,
             previews,
             visible: Vec::new(),
             viewer: None,
@@ -362,6 +366,25 @@ impl App {
         self.live_zoom.set(camera.zoom);
         self.update_previews();
         previews_changed
+    }
+
+    /// Whether a trackpad `kind` gesture event should move the camera. A trackpad reports small pinches during a
+    /// two-finger scroll (and scrolls during a pinch), so whichever starts first owns the camera until it ends, or
+    /// until the fingers have been still for a moment when the system doesn't say.
+    pub fn claim_gesture(&mut self, kind: Gesture, phase: GesturePhase) -> bool {
+        const QUIET: std::time::Duration = std::time::Duration::from_millis(200);
+        let now = std::time::Instant::now();
+        let claimed = match self.gesture {
+            Some((owner, at)) if owner != kind && now.duration_since(at) < QUIET => false,
+            _ => {
+                self.gesture = Some((kind, now));
+                true
+            }
+        };
+        if claimed && phase == GesturePhase::Ended {
+            self.gesture = None;
+        }
+        claimed
     }
 
     pub fn pan_start(&mut self) {
@@ -694,4 +717,11 @@ pub fn number(value: &Value) -> Option<f64> {
         Value::Float(v) => Some(*v),
         _ => None,
     }
+}
+
+/// What a trackpad gesture does to the camera.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gesture {
+    Pan,
+    Zoom,
 }

@@ -11,7 +11,7 @@ use rune::{
 use rune_kit::Kit;
 
 use super::{SMALL, SMALL_MEDIUM, family_color};
-use crate::app::App;
+use crate::app::{App, Gesture};
 use crate::geometry::{self, CONNECTOR, NODE_H, NODE_W, PREVIEW_H, TITLE_H};
 use crate::network;
 use crate::previews::Preview;
@@ -38,7 +38,12 @@ pub fn editor(s: &App, k: &Kit) -> El {
         .fill(k.c.bg_base)
         .on_layout(|s: &mut App, r| s.set_viewport([r[2], r[3]]))
         .on_wheel(|s: &mut App, e: WheelEvent, tx: &mut Tx| {
-            let camera = if e.mods.cmd || e.mods.ctrl {
+            // ⌘ or Ctrl says what the user means, so only plain scrolls take part in the trackpad's gesture lock.
+            let zoom = e.mods.cmd || e.mods.ctrl;
+            if !zoom && !s.claim_gesture(Gesture::Pan, e.phase) {
+                return true;
+            }
+            let camera = if zoom {
                 s.camera.zoomed_about([e.x, e.y], (1.0 - e.dy * 0.01).clamp(0.5, 2.0))
             } else {
                 s.camera.panned([e.dx, e.dy])
@@ -49,6 +54,9 @@ pub fn editor(s: &App, k: &Kit) -> El {
             true
         })
         .on_magnify(|s: &mut App, e: MagnifyEvent, tx: &mut Tx| {
+            if !s.claim_gesture(Gesture::Zoom, e.phase) {
+                return true;
+            }
             if !s.set_camera(s.camera.zoomed_about([e.x, e.y], 1.0 + e.delta)) {
                 tx.live_only();
             }

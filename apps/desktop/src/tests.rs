@@ -290,3 +290,89 @@ fn new_nodes_land_where_the_canvas_was_clicked() {
     assert_eq!(menu.world, [world[0] - NODE_W / 2.0, world[1] - NODE_H / 2.0]);
     assert!(geometry::contains(geometry::node_rect(menu.world), world));
 }
+
+/// Where node `path` is drawn, in window points.
+fn drawn(rt: &Runtime<App>, path: &str) -> [f32; 4] {
+    rt.presented(&format!("node:{path}")).expect("the node is drawn").0
+}
+
+#[test]
+fn the_camera_matches_what_is_drawn() {
+    use rune::MagnifyEvent;
+    let mut rt = runtime();
+    let canvas = rect(&rt, "canvas");
+    let check = |rt: &Runtime<App>, what: &str| {
+        let op = rt.state.nodes().into_iter().find(|op| op.path == "/lfo1").unwrap();
+        let camera = rt.state.camera;
+        let top_left = camera.to_screen(op.position);
+        let r = drawn(rt, "/lfo1");
+        let expected = [
+            canvas[0] + top_left[0],
+            canvas[1] + top_left[1],
+            NODE_W * camera.zoom,
+            NODE_H * camera.zoom,
+        ];
+        for (a, b) in r.iter().zip(expected) {
+            assert!((a - b).abs() < 0.5, "{what}: drawn {r:?}, camera says {expected:?}");
+        }
+    };
+    check(&rt, "at rest");
+
+    // Pinching keeps the point under the pointer still.
+    let (x, y) = (canvas[0] + 300.0, canvas[1] + 200.0);
+    let under = rt.state.camera.to_world([300.0, 200.0]);
+    for _ in 0..5 {
+        rt.magnify_event(MagnifyEvent::new(0.2).at(x, y));
+        rt.frame(1.0 / 60.0);
+    }
+    rt.magnify_event(MagnifyEvent::new(0.0).at(x, y).phase(rune::GesturePhase::Ended));
+    settle(&mut rt);
+    check(&rt, "after zooming in");
+    let after = rt.state.camera.to_world([300.0, 200.0]);
+    assert!(
+        (under[0] - after[0]).abs() < 0.5 && (under[1] - after[1]).abs() < 0.5,
+        "{under:?} moved to {after:?}"
+    );
+
+    // Panning at that zoom moves by exactly the deltas and doesn't change the size.
+    let zoom = rt.state.camera.zoom;
+    let before = drawn(&rt, "/lfo1");
+    rt.wheel_event(WheelEvent::new(-40.0, 25.0).at(x, y).precise(true));
+    settle(&mut rt);
+    let moved = drawn(&rt, "/lfo1");
+    assert_eq!(rt.state.camera.zoom, zoom, "panning changed the zoom");
+    assert!(
+        (moved[0] - before[0] + 40.0).abs() < 0.5 && (moved[1] - before[1] - 25.0).abs() < 0.5,
+        "{before:?} -> {moved:?}"
+    );
+    assert!((moved[2] - before[2]).abs() < 0.01, "panning changed the drawn size");
+    check(&rt, "after panning");
+}
+
+#[test]
+fn pinches_during_a_scroll_dont_zoom() {
+    use rune::MagnifyEvent;
+    let mut rt = runtime();
+    let canvas = rect(&rt, "canvas");
+    let (x, y) = (canvas[0] + 300.0, canvas[1] + 200.0);
+    let zoom = rt.state.camera.zoom;
+    // A two-finger scroll with the stray pinches a trackpad reports along with it.
+    for _ in 0..5 {
+        rt.wheel_event(WheelEvent::new(-10.0, 4.0).at(x, y).precise(true));
+        rt.magnify_event(MagnifyEvent::new(0.01).at(x, y));
+        rt.frame(1.0 / 60.0);
+    }
+    settle(&mut rt);
+    assert_eq!(rt.state.camera.zoom, zoom, "the scroll owns the gesture");
+    // And a pinch's stray scrolls don't pan.
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    let pan = rt.state.camera.pan;
+    rt.magnify_event(MagnifyEvent::new(0.2).at(x, y));
+    rt.frame(1.0 / 60.0);
+    let pinched = rt.state.camera;
+    assert!(pinched.zoom > zoom);
+    rt.wheel_event(WheelEvent::new(-30.0, 0.0).at(x, y).precise(true));
+    settle(&mut rt);
+    assert_eq!(rt.state.camera.pan, pinched.pan, "the pinch owns the gesture");
+    assert_ne!(pinched.pan, pan);
+}

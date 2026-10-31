@@ -54,20 +54,25 @@ Each operator belongs to one family, and the family decides what flows along its
 
 ## Expressions and scripting
 
-[Rhai](https://rhai.rs) is used for both parameter expressions and scripting (callbacks, script operators).
+[Luau](https://luau.org), embedded through [mlua](https://crates.io/crates/mlua), is used for both parameter
+expressions and scripting (callbacks, script operators). It was chosen over Rhai for speed: it is roughly 10× faster
+in [script-bench-rs](https://github.com/khvzak/script-bench-rs) and 2–3× faster than CPython. It is also sandboxed by
+design and proven at scale (Roblox). The cost is a C++ dependency, which mlua vendors and builds.
 
-- **Expressions are compiled once.** Each expression is compiled to an AST when it is edited and re-evaluated on
-  cook. Its result is cached until one of its dependencies changes.
-- **Simple expressions skip the interpreter.** Constants, a bare parameter or channel reference, and basic arithmetic
-  on those are recognised up front and run on a native path. This is the same trick as TouchDesigner's "optimized"
+- **Expressions are compiled once.** Each expression is compiled to bytecode when it is edited and run on cook. Its
+  result is cached until one of its dependencies changes.
+- **Simple expressions skip the VM.** Constants, a bare parameter or channel reference, and basic arithmetic on those
+  are recognised up front and run on a native path. This is the same trick as TouchDesigner's "optimized"
   expressions.
-- **Dependencies are captured through accessors.** The graph is exposed to Rhai through registered functions (`op`,
-  `parent`, `me`, `time`, parameter and channel access). Each call records a dependency for the operator being
-  cooked.
-- **Scripts are sandboxed by default.** Engines get operation and call-depth limits and no filesystem access.
-  Imports are allowed only from Data operators in the project.
-- The `sync` feature is enabled so a compiled script can move between threads once cooking goes parallel.
-- GPU work stays in WGSL. Rhai never runs per pixel or per point.
+- **Dependencies are captured through accessors.** The graph is exposed to Luau as userdata (`op`, `parent`, `me`,
+  `time`, parameter and channel access). Each access records a dependency for the operator being cooked.
+- **Scripts are sandboxed.** Luau sandbox mode makes globals and the standard library read-only. Interrupts enforce a
+  time budget per call. There is no filesystem or OS access, and `require` resolves only to Data operators in the
+  project.
+- **Types.** Scripts may use Luau type annotations, and the editor ships type definitions for the graph API.
+- **One VM per cook thread.** Lua states are not shared across threads. When cooking goes parallel, each worker gets
+  its own VM, and compiled bytecode is shared between them.
+- GPU work stays in WGSL. Luau never runs per pixel or per point.
 
 ## Rendering
 

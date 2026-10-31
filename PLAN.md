@@ -194,10 +194,11 @@ script1 "data/text" file="controller.luau"
 ## Operator definitions
 
 Every operator type (its family, inputs, outputs, and parameters with types, defaults, ranges, menus, labels and
-docs) is declared in Rust, next to its cook code, with a derive macro:
+docs) is declared in Rust, next to its cook code. [Specta](https://github.com/specta-rs/specta) describes the types,
+and our own `Params` derive adds what Specta doesn't model:
 
 ```rust
-#[derive(Params)]
+#[derive(Type, Params)]
 pub struct NoiseParams {
     /// Size of one noise cell.
     #[param(default = 1.0, min = 0.0, soft_max = 10.0)]
@@ -209,21 +210,36 @@ pub struct NoiseParams {
     pub kind: Kind,
 }
 
-#[derive(Menu)]
+#[derive(Type, Menu)]
 pub enum Kind { Perlin, Simplex, Worley }
 ```
 
-- **One source, many outputs.** The derive produces a static schema for each operator. The registry built from those
-  schemas drives:
+- **Specta handles shape and docs.** `#[derive(Type)]` gives each type a runtime description: fields, types, enums,
+  `///` docs and deprecation. `#[specta]` does the same for the functions of the scripting API.
+- **`Params` adds parameter metadata.** Defaults, ranges, menus, labels and pages are stored as Specta runtime
+  attributes on the fields, so one type graph carries everything.
+- **One source, many outputs.** The registry built from these descriptions drives:
   - the parameter inspector
   - KDL reading and writing
-  - the Luau definition files for luau-lsp
+  - the Luau definition files for luau-lsp, through a new Specta exporter (below)
   - the reference docs (`futhark docs`)
 
   No generated files are committed.
 - **Mistakes fail at compile time where possible.** The macro rejects a default outside `min..max` and duplicate
   names. A registry test covers the rest (unique type names, every family's converters registered).
-- **Doc comments are the docs.** `///` comments on fields become parameter tooltips and reference docs.
+- Specta is still a 2.0 release candidate, so it is pinned to an exact version like everything else.
+
+### specta-luau
+
+A Luau exporter for Specta, written for Futhark and upstreamable to specta-rs. It turns Specta types and functions into
+luau-lsp definition files: structs become table types, enums become string-literal unions or tagged unions, and
+functions become `declare function`. `specta-typescript` is the closest model, since Luau's type syntax is close to
+TypeScript's.
+
+Specta has no notion of methods on a type. Script-facing handles (operators, parameters, channels) are Luau userdata
+with methods, so the exporter takes a small class description for them (a name, Specta functions as methods, Specta
+types as properties) and emits `declare class` blocks.
+
 - Custom parameters on components are project data, so they live in KDL.
 
 ## Architecture
@@ -236,6 +252,7 @@ Planned workspace:
 - `crates/ops`: the built-in operators of every family.
 - `crates/project`: reading and writing the KDL project format, the file watcher and reload, and `check`.
 - `crates/macros`: the `Params` and `Menu` derives.
+- `crates/specta-luau`: the Specta exporter for Luau definition files.
 - `crates/script`: the Luau runtime (mlua), expression compilation and evaluation, and generation of the definition
   files and sourcemap.
 - `crates/cli`: a headless runner (render a project to files, run tests).

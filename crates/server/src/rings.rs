@@ -145,9 +145,11 @@ impl Rings {
 pub struct Completions(mpsc::Sender<()>);
 
 impl Completions {
-    pub fn spawn(gpu: Arc<Gpu>) -> Self {
+    /// Starts the completion thread. It runs until every `Completions` is dropped; join it after that so the GPU
+    /// isn't torn down under it.
+    pub fn spawn(gpu: Arc<Gpu>) -> (Self, thread::JoinHandle<()>) {
         let (sender, submitted) = mpsc::channel::<()>();
-        thread::Builder::new()
+        let thread = thread::Builder::new()
             .name("gpu completions".into())
             .spawn(move || {
                 while submitted.recv().is_ok() {
@@ -156,7 +158,7 @@ impl Completions {
                 }
             })
             .expect("spawning the GPU completion thread");
-        Completions(sender)
+        (Completions(sender), thread)
     }
 
     /// Runs `done` once everything submitted so far has finished on the GPU.

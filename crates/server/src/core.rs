@@ -33,22 +33,27 @@ pub struct Handle {
 }
 
 impl Handle {
-    /// Runs `job` on the engine thread and waits for its result.
-    pub fn call<R: Send + 'static>(&self, job: impl FnOnce(&mut Core) -> R + Send + 'static) -> R {
+    /// Runs `job` on the engine thread and waits for its result. Fails once the server is shutting down.
+    pub fn call<R: Send + 'static>(&self, job: impl FnOnce(&mut Core) -> R + Send + 'static) -> std::io::Result<R> {
+        let stopped = || std::io::Error::other("futharkd is shutting down");
         let (reply, result) = mpsc::channel();
         let job: Job = Box::new(move |core| {
             let _ = reply.send(job(core));
         });
-        self.jobs
-            .send(job)
-            .expect("the engine thread runs for the life of the process");
-        result.recv().expect("the engine thread replies to every job")
+        self.jobs.send(job).map_err(|_| stopped())?;
+        result.recv().map_err(|_| stopped())
+    }
+
+    /// Asks the engine thread to stop: it ends every stream, then drops the GPU once its completion thread has
+    /// finished, and exits. Join the handle `spawn` returned to wait for it.
+    pub fn stop(&self) {
+        let _ = self.jobs.send(Box::new(|core: &mut Core| core.quit = true));
     }
 }
 
-pub fn spawn() -> Handle {
+pub fn spawn() -> (Handle, thread::JoinHandle<()>) {
     let (jobs, queue) = mpsc::channel::<Job>();
-    thread::Builder::new()
+    let thread = thread::Builder::new()
         .name("engine".into())
         .spawn(move || {
             let gpu = match Gpu::headless() {
@@ -58,7 +63,7 @@ pub fn spawn() -> Handle {
                     None
                 }
             };
-            let completions = gpu.clone().map(Completions::spawn);
+            let (completions, completion_thread) = gpu.clone().map(Completions::spawn).unzip();
             let mut core = Core {
                 registry: Arc::new(futhark_ops::registry()),
                 gpu,
@@ -68,17 +73,25 @@ pub fn spawn() -> Handle {
                 viewers: HashMap::new(),
                 previewers: HashMap::new(),
                 next_stream: 1,
+                quit: false,
             };
-            loop {
+            while !core.quit {
                 match queue.recv_timeout(core.until_next_frame()) {
                     Ok(job) => job(&mut core),
                     Err(mpsc::RecvTimeoutError::Timeout) => core.tick(),
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
             }
+            core.end_streams("futharkd is shutting down");
+            drop(core);
+            // The GPU goes when the completion thread lets go of it: wait, so nothing is inside the driver when the
+            // process exits.
+            if let Some(thread) = completion_thread {
+                let _ = thread.join();
+            }
         })
         .expect("spawning the engine thread");
-    Handle { jobs }
+    (Handle { jobs }, thread)
 }
 
 pub struct Core {
@@ -90,6 +103,7 @@ pub struct Core {
     viewers: HashMap<u64, Viewer>,
     previewers: HashMap<u64, Previewer>,
     next_stream: u64,
+    quit: bool,
 }
 
 struct OpenProject {

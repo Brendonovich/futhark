@@ -31,11 +31,11 @@ pub struct Options {
 /// Runs the server until a client asks it to shut down.
 pub fn run(options: Options) -> io::Result<()> {
     let listener = bind(&options.socket)?;
-    let core = core::spawn();
+    let (core, engine) = core::spawn();
 
     if let Some(project) = options.project {
         let path = std::path::absolute(project)?.to_string_lossy().into_owned();
-        core.call(move |core: &mut Core| core.handle(Method::Open(OpenParams { path })))
+        core.call(move |core: &mut Core| core.handle(Method::Open(OpenParams { path })))?
             .map_err(|e| io::Error::other(e.message))?;
     }
 
@@ -49,10 +49,11 @@ pub fn run(options: Options) -> io::Result<()> {
     }
 
     let socket = options.socket.clone();
+    let listening = core.clone();
     thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
-            let (core, stop) = (core.clone(), stop.clone());
+            let (core, stop) = (listening.clone(), stop.clone());
             thread::spawn(move || {
                 if let Err(error) = serve(stream, &core, &stop)
                     && error.kind() != io::ErrorKind::BrokenPipe
@@ -65,6 +66,8 @@ pub fn run(options: Options) -> io::Result<()> {
 
     let _ = stopped.recv();
     let _ = fs::remove_file(&socket);
+    core.stop();
+    let _ = engine.join();
     Ok(())
 }
 
@@ -105,7 +108,7 @@ fn serve(stream: UnixStream, core: &core::Handle, stop: &mpsc::Sender<()>) -> io
         let id = request.id;
         match request.method {
             Method::Watch => {
-                let (events, status) = core.call(|core: &mut Core| core.subscribe());
+                let (events, status) = core.call(|core: &mut Core| core.subscribe())?;
                 write_line(&mut writer, &Response::ok(id, to_value(&status)))?;
                 for event in events {
                     write_line(&mut writer, &Notification::event(event))?;
@@ -114,7 +117,7 @@ fn serve(stream: UnixStream, core: &core::Handle, stop: &mpsc::Sender<()>) -> io
             }
             Method::SharedFrames(params) => {
                 let (events, received) = mpsc::channel();
-                let started = core.call(move |core: &mut Core| core.start_viewer(params, events));
+                let started = core.call(move |core: &mut Core| core.start_viewer(params, events))?;
                 return run_stream(
                     writer,
                     lines,
@@ -128,7 +131,7 @@ fn serve(stream: UnixStream, core: &core::Handle, stop: &mpsc::Sender<()>) -> io
             }
             Method::Previews(params) => {
                 let (events, received) = mpsc::channel();
-                let started = core.call(move |core: &mut Core| core.start_previews(params, events));
+                let started = core.call(move |core: &mut Core| core.start_previews(params, events))?;
                 return run_stream(
                     writer,
                     lines,
@@ -146,7 +149,7 @@ fn serve(stream: UnixStream, core: &core::Handle, stop: &mpsc::Sender<()>) -> io
                 return Ok(());
             }
             method => {
-                let response = match core.call(move |core: &mut Core| core.handle(method)) {
+                let response = match core.call(move |core: &mut Core| core.handle(method))? {
                     Ok(result) => Response::ok(id, result),
                     Err(error) => Response::error(Some(id), error),
                 };
@@ -185,15 +188,22 @@ where
         for line in lines {
             let Ok(line) = line else { break };
             match serde_json::from_str::<C>(&line) {
-                Ok(message) => reader_core.call(move |core: &mut Core| control(core, stream, message)),
+                Ok(message) => {
+                    if reader_core
+                        .call(move |core: &mut Core| control(core, stream, message))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
                 Err(error) => eprintln!("futharkd: ignoring a stream control: {error}"),
             }
         }
-        reader_core.call(move |core: &mut Core| stop(core, stream));
+        let _ = reader_core.call(move |core: &mut Core| stop(core, stream));
     });
 
     let result = events.iter().try_for_each(|event| write_line(&mut writer, &event));
-    core.call(move |core: &mut Core| stop(core, stream));
+    let _ = core.call(move |core: &mut Core| stop(core, stream));
     result
 }
 

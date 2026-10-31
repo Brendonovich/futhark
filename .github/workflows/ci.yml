@@ -13,7 +13,8 @@ jobs:
       WGPU_BACKEND: vulkan
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
+      # The desktop app's Rune links libxkbcommon and libwayland-client at build time.
+      - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers libxkbcommon-dev libwayland-dev
       - run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - run: scripts/check

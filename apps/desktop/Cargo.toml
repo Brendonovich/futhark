@@ -1,0 +1,23 @@
+[package]
+name = "futhark-desktop"
+description = "The Futhark desktop app: a network editor, viewers and an inspector, as a client of futharkd."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+futhark-client.workspace = true
+futhark-protocol.workspace = true
+futhark-surfaces.workspace = true
+rune.workspace = true
+rune-kit.workspace = true
+rune-theme-opencode.workspace = true
+
+[dev-dependencies]
+# The end-to-end tests run a real server in process, on a private socket.
+futhark-server.workspace = true
+
+[lints]
+workspace = true

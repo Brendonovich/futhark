@@ -166,7 +166,10 @@ impl Core {
             Method::Edit(params) => to_value(&self.edit(params)?),
             Method::Sample(params) => to_value(&self.sample(params)?),
             Method::SharedFrames(_) => {
-                return Err(RpcError::new(RpcError::UNSUPPORTED, "shared frames need the Texture family"));
+                return Err(RpcError::new(
+                    RpcError::UNSUPPORTED,
+                    "shared frames need the Texture family",
+                ));
             }
             Method::Watch | Method::Shutdown => unreachable!("handled by the connection"),
         })

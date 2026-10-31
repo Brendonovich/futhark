@@ -10,8 +10,8 @@ in `docs/research/touchdesigner.md`.
   OpenGL-era GLSL, and no "export" parameter mode (binds and expressions cover it).
 - **Plain names.** Families are called Texture, Channel, Geometry, Data, Shader and Component, not TOP, CHOP and so on.
 - **wgpu for every GPU operation**: texture ops, geometry, rendering and readback. Shaders are WGSL. Rune also renders
-  through wgpu (30.x), so the engine and the UI share a single `wgpu::Device` and textures never leave the GPU to be
-  shown.
+  through wgpu (30.x), so the engine creates a single `wgpu::Device` that Rune adopts, and textures never leave the
+  GPU to be shown.
 - **The engine is headless.** The graph, cooking and operators know nothing about the UI. The editor is a thin Rune
   client, and the engine can also run without a window: offline renders, tests, a CLI.
 
@@ -74,6 +74,26 @@ design and proven at scale (Roblox). The cost is a C++ dependency, which mlua ve
   its own VM, and compiled bytecode is shared between them.
 - GPU work stays in WGSL. Luau never runs per pixel or per point.
 
+### Script tooling
+
+IntelliSense comes from [luau-lsp](https://github.com/JohnnyMorganz/luau-lsp), run as a language server. It provides
+autocomplete, hover, signature help, type errors, go to definition, rename and semantic tokens.
+
+- **Definition files describe the graph API.** They cover the globals (`op`, `me`, `parent`, `time`) and a class for
+  each operator type with its typed parameters.
+  - They are generated from the operator registry, so they can't drift from the code.
+  - Generation runs from the CLI and the editor.
+- **A sourcemap describes the operator tree.** luau-lsp's Rojo-style sourcemap is generated from the project's
+  network, so `parent().noise1.par.` completes real nodes and parameters. It is regenerated when the network changes.
+- **In the editor**, the editor ships a luau-lsp binary at a pinned version and talks LSP to it over stdio. The
+  editor draws completion popups, hover cards and diagnostics with Rune. Highlighting comes from semantic tokens.
+- **In outside editors** (VS Code, Zed, Neovim), the same definition files and sourcemap give full IntelliSense on
+  scripts checked out to disk.
+- Paths passed as strings (`op("../noise1")`) are completed by the editor itself, because the type checker can't see
+  into strings. Typed access (`parent().noise1`) is the preferred style.
+- Linking Luau's analysis library directly (in process, completions from the live graph) is a possible later step if
+  regenerating the sourcemap ever lags behind editing.
+
 ## Rendering
 
 - Texture operators record into a shared `wgpu::CommandEncoder` per frame, drawing from a pool of textures keyed by
@@ -85,6 +105,48 @@ design and proven at scale (Roblox). The cost is a C++ dependency, which mlua ve
   outputs a Texture. Each Geometry component holds a Geometry network and a Shader, and supports instancing with
   per-instance attributes from any family.
 
+## GPU device
+
+The engine creates the wgpu instance, adapter, device and queue, and Rune adopts them.
+
+- The engine creates its device the same way whether it runs headless (CLI, tests) or windowed, so GPU code has a
+  single path.
+- When windowed, the engine checks that its adapter supports the window's surface. It creates the device with the
+  features and limits that both the engine and Rune need.
+- Rune today creates its own `Gpu` per window (`Gpu::for_surface` in `window.rs`) and has no public way to accept
+  one. `Gpu`'s fields are public, so the missing piece is a small upstream change: a run option that takes an
+  `Arc<Gpu>` and uses it instead of creating one. That change is the first task of the Editor milestone.
+- Engine textures are drawn in the UI through Rune effect slots and a compositor, on the same device, with no copies.
+
+## Project files
+
+A project is a directory holding a SQLite database and a media folder:
+
+```text
+show.futhark/
+  project.db        operators, parameters, wires, components, metadata
+  media/            content-addressed files: <sha256>.<ext>
+```
+
+- **The database is the source of truth for the network.**
+  - Tables cover operators (id, parent, name, type, position, flags), parameters (operator, name, mode, constant
+    value, expression, bind target), wires (from, output index, to, input index), media (hash, original name, type,
+    size) and a schema version.
+  - Saves are incremental and transactional: each edit is a small write, so autosave is free and a crash never leaves
+    a half-written project.
+  - Undo history can live in the same database.
+- **Media is normalized.** Imported files (images, video, audio, models, fonts) are copied into `media/` under their
+  content hash, so duplicates are stored once. Operators refer to media by hash, never by an absolute path, so the
+  project moves between machines intact.
+- **Unused media is collected.** Files no longer referenced by any operator are removed on save, or kept until an
+  explicit clean.
+- **Reusable components** export to the same format: a directory with its own `project.db` holding one component,
+  plus the media it uses. Import copies the media in and deduplicates by hash.
+- **Diffs.** A binary database doesn't diff in git, so the CLI can dump a project to a stable text form for review
+  (`futhark dump show.futhark`). Writing that text form is optional; the database stays canonical.
+- Scripts and shaders live in Data operators in the database. `futhark checkout` writes them out next to the
+  sourcemap for editing in outside editors, and changes are synced back.
+
 ## Architecture
 
 Planned workspace:
@@ -93,7 +155,9 @@ Planned workspace:
   scheduler and the clock. No GPU code.
 - `crates/gpu`: the wgpu context, texture and buffer pools, WGSL helpers and readback.
 - `crates/ops`: the built-in operators of every family.
-- `crates/project`: saving and loading projects and reusable components.
+- `crates/project`: the SQLite project database, the media store, and component import and export.
+- `crates/script`: the Luau runtime (mlua), expression compilation and evaluation, and generation of the definition
+  files and sourcemap.
 - `crates/cli`: a headless runner (render a project to files, run tests).
 - `apps/editor`: the Rune desktop app, including:
   - a network editor (a canvas with pan and zoom, nodes, wires)
@@ -110,15 +174,9 @@ Rune: pin `anomalyco/rune` to an exact `rev` on `dev`. Its wgpu is `~30.0.1`; ou
    LFO, Noise, Math) as the first test bed.
 3. **Textures**: Constant, Ramp, Noise, Transform, Level, Composite, Shader, and File In. Headless golden-image tests
    via readback.
-4. **Editor**: a Rune app with the network editor, texture and channel viewers, and a parameter inspector, all on
-   the shared device.
-5. **Data and expressions**: tables and text, expressions and binds, Channel ↔ Texture ↔ Data converters.
+4. **Editor**: the upstream Rune change to adopt an engine-created device, then a Rune app with the network editor,
+   texture and channel viewers, and a parameter inspector. Projects save to SQLite.
+5. **Data and expressions**: tables and text, Luau expressions and binds, Channel ↔ Texture ↔ Data converters, and
+   the script editor with luau-lsp IntelliSense.
 6. **3D**: the Geometry family, Shader family, Render, Camera, Light, and instancing.
 7. **Output and I/O**: Window components, perform mode, OSC and MIDI in and out, audio in and out.
-
-## Open questions
-
-- **Device ownership.** Either the engine creates the device and Rune adopts it, or the engine takes Rune's `Gpu`.
-  The second works today through the compositor hook. The first is needed to run headless and windowed with the same
-  code.
-- **Project file format.** A text format that diffs well (one file per component?) versus a single file.

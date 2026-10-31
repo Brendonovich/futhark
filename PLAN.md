@@ -81,7 +81,7 @@ autocomplete, hover, signature help, type errors, go to definition, rename and s
 
 - **Definition files describe the graph API.** They cover the globals (`op`, `me`, `parent`, `time`) and a class for
   each operator type with its typed parameters.
-  - They are generated from the Pkl operator definitions, so they can't drift from the code.
+  - They are generated from the operator registry, so they can't drift from the code.
 - **A sourcemap describes the operator tree.** luau-lsp's Rojo-style sourcemap is generated from the project's
   network, so `parent().noise1.par.` completes real nodes and parameters. It is regenerated when the network changes.
   luau-lsp requires its sourcemap to be JSON, so it is written to the gitignored `.futhark/` cache and never
@@ -193,32 +193,38 @@ script1 "data/text" file="controller.luau"
 
 ## Operator definitions
 
-Every operator type (its family, inputs, outputs, parameters with types, defaults, ranges, menus, labels and docs) is
-declared in [Pkl](https://pkl-lang.org), not hand-written in Rust.
+Every operator type (its family, inputs, outputs, and parameters with types, defaults, ranges, menus, labels and
+docs) is declared in Rust, next to its cook code, with a derive macro:
 
-```pkl
-noise = new TextureOp {
-  label = "Noise"
-  inputs = 0
-  params {
-    ["period"] = new Float { default = 1; min = 0; softMax = 10 }
-    ["amp"] = new Float { default = 1 }
-    ["seed"] = new Int { default = 0 }
-    ["kind"] = new Menu { default = "perlin"; items { "perlin"; "simplex"; "worley" } }
-  }
+```rust
+#[derive(Params)]
+pub struct NoiseParams {
+    /// Size of one noise cell.
+    #[param(default = 1.0, min = 0.0, soft_max = 10.0)]
+    pub period: f32,
+    #[param(default = 1.0)]
+    pub amp: f32,
+    pub seed: i32,
+    #[param(default = Kind::Perlin)]
+    pub kind: Kind,
 }
+
+#[derive(Menu)]
+pub enum Kind { Perlin, Simplex, Worley }
 ```
 
-- **One source, many outputs.** A generator (`cargo xtask gen`) evaluates the Pkl definitions and produces:
-  - typed Rust parameter structs and the operator registry
+- **One source, many outputs.** The derive produces a static schema for each operator. The registry built from those
+  schemas drives:
+  - the parameter inspector
+  - KDL reading and writing
   - the Luau definition files for luau-lsp
-  - the reference docs
-- **Generated code is committed.** A normal `cargo build` doesn't need Pkl installed, and CI checks the generated
-  files are up to date.
-- **Pkl validates the definitions.** Schemas and constraints (`default` within `min..max`, menu defaults present in
-  `items`, unique names) catch mistakes before any Rust is generated.
-- Pkl is evaluated with the pinned `pkl` CLI, through [rpkl](https://crates.io/crates/rpkl) in the generator.
-- Custom parameters on components are project data, so they live in KDL, not Pkl.
+  - the reference docs (`futhark docs`)
+
+  No generated files are committed.
+- **Mistakes fail at compile time where possible.** The macro rejects a default outside `min..max` and duplicate
+  names. A registry test covers the rest (unique type names, every family's converters registered).
+- **Doc comments are the docs.** `///` comments on fields become parameter tooltips and reference docs.
+- Custom parameters on components are project data, so they live in KDL.
 
 ## Architecture
 
@@ -229,7 +235,7 @@ Planned workspace:
 - `crates/gpu`: the wgpu context, texture and buffer pools, WGSL helpers and readback.
 - `crates/ops`: the built-in operators of every family.
 - `crates/project`: reading and writing the KDL project format, the file watcher and reload, and `check`.
-- `defs/`: the Pkl operator definitions. `xtask` generates the Rust registry, Luau definitions and docs from them.
+- `crates/macros`: the `Params` and `Menu` derives.
 - `crates/script`: the Luau runtime (mlua), expression compilation and evaluation, and generation of the definition
   files and sourcemap.
 - `crates/cli`: a headless runner (render a project to files, run tests).

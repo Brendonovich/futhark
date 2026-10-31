@@ -373,12 +373,15 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "futhark-client",
+ "futhark-gpu",
  "futhark-graph",
  "futhark-ops",
  "futhark-project",
  "futhark-protocol",
+ "futhark-surfaces",
  "serde",
  "serde_json",
+ "wgpu",
 ]
 
 [[package]]

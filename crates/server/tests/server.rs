@@ -149,7 +149,9 @@ fn opens_edits_samples_and_saves() {
         .unwrap();
     assert!(edited.revision > snapshot.revision);
 
-    let Sample::Channel { channels, .. } = client.sample("/sum").unwrap();
+    let Sample::Channel { channels, .. } = client.sample("/sum").unwrap() else {
+        panic!("a Channel sample")
+    };
     assert_eq!(channels[0].samples, [2.0]);
 
     // A stale revision is refused, and a failing batch changes nothing.
@@ -221,7 +223,9 @@ fn the_clock_runs_in_real_time() {
     thread::sleep(Duration::from_millis(100));
     let frame = client.status().unwrap().frame;
     assert!((4..=60).contains(&frame), "frame {frame} after 100 ms at 60 fps");
-    let Sample::Channel { frame: sampled, .. } = client.sample("/lfo1").unwrap();
+    let Sample::Channel { frame: sampled, .. } = client.sample("/lfo1").unwrap() else {
+        panic!("a Channel sample")
+    };
     assert!(sampled >= frame);
 }
 
@@ -260,4 +264,148 @@ fn raw(socket: &Path, line: &str) -> serde_json::Value {
     let mut reply = String::new();
     BufReader::new(stream).read_line(&mut reply).unwrap();
     serde_json::from_str(&reply).unwrap()
+}
+
+#[test]
+fn previews_carry_channel_values_and_errors() {
+    use futhark_protocol::previews;
+    let server = Server::start("previews-channels");
+    let project = server.example("hello");
+    let mut client = server.client();
+    client.open(&project).unwrap();
+
+    let mut stream = previews_stream(&server, vec![node("/lfo1"), node("/missing"), node("/fx")]);
+    let previews::Event::Frame { slot, previews, .. } = next_frame(&mut stream) else {
+        unreachable!()
+    };
+    assert_eq!(slot, None);
+    let channels = previews[0].channels.as_ref().unwrap();
+    assert_eq!(channels[0].0, "chan1");
+    assert_eq!(previews[1].error.as_deref(), Some("no operator at /missing"));
+    assert_eq!(previews[2].error.as_deref(), Some("/fx has no output"));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn viewers_and_previews_share_finished_surfaces() {
+    use futhark_client::Update;
+    use futhark_protocol::{previews, shared};
+
+    let server = Server::start("shared");
+    let project = server.example("textures");
+    let mut client = server.client();
+    client.open(&project).unwrap();
+    assert!(
+        client
+            .hello()
+            .unwrap()
+            .capabilities
+            .contains(&"shared-frames:iosurface-mach".to_string())
+    );
+
+    // A viewer: frames arrive in a ring, drawn before they're announced.
+    let params = shared::Params {
+        path: "/out".into(),
+        max_width: 320,
+        max_height: 320,
+        fps: None,
+        slots: None,
+    };
+    let mut viewer = server.client().shared_frames(params).unwrap();
+    assert_eq!(viewer.transport(), "iosurface-mach");
+    let mut last = -1;
+    for _ in 0..5 {
+        let Some(Update::Frame(frame)) = viewer.recv().unwrap() else {
+            panic!("expected a frame")
+        };
+        assert_eq!((frame.surface.width(), frame.surface.height()), (320, 180));
+        assert!(frame.frame > last);
+        last = frame.frame;
+        assert!(
+            frame.surface.read_bgra().chunks(4).all(|p| p[3] == 255),
+            "an undrawn frame"
+        );
+    }
+
+    // A viewer of something that isn't a texture reports it.
+    let params = shared::Params {
+        path: "/nope".into(),
+        max_width: 64,
+        max_height: 64,
+        fps: None,
+        slots: None,
+    };
+    let mut broken = server.client().shared_frames(params).unwrap();
+    let Some(Update::Error(message)) = broken.recv().unwrap() else {
+        panic!("expected an error")
+    };
+    assert_eq!(message, "no operator at /nope");
+
+    // Previews: two textures packed into one atlas.
+    let mut stream = previews_stream(&server, vec![node("/glow"), node("/out")]);
+    let (ring, surfaces) = loop {
+        let line = read_line(&mut stream.0);
+        if let previews::Event::Ring {
+            width,
+            height,
+            service,
+            token,
+            ..
+        } = line
+        {
+            let surfaces = futhark_surfaces::fetch(&service, &token, Duration::from_secs(2)).unwrap();
+            break ((width, height), surfaces);
+        }
+    };
+    assert_eq!(ring, (2048, 256));
+    let previews::Event::Frame { slot, previews, .. } = next_frame(&mut stream) else {
+        unreachable!()
+    };
+    assert_eq!(previews[0].rect, Some([0, 0, 160, 90]));
+    assert_eq!(previews[1].rect, Some([160, 0, 160, 90]));
+    let pixels = surfaces[slot.unwrap() as usize].read_bgra();
+    let alpha = |x: usize, y: usize| pixels[(y * 2048 + x) * 4 + 3];
+    assert_eq!(
+        (alpha(200, 45), alpha(400, 45)),
+        (255, 0),
+        "drawn inside the rects only"
+    );
+}
+
+fn node(path: &str) -> futhark_protocol::previews::Node {
+    futhark_protocol::previews::Node {
+        path: path.into(),
+        width: 160,
+        height: 160,
+    }
+}
+
+/// A raw previews connection.
+struct PreviewStream(std::io::BufReader<std::os::unix::net::UnixStream>);
+
+fn previews_stream(server: &Server, nodes: Vec<futhark_protocol::previews::Node>) -> PreviewStream {
+    use futhark_protocol::{Method, Request, previews};
+    use std::io::Write;
+    let mut stream = std::os::unix::net::UnixStream::connect(&server.socket).unwrap();
+    let request = Request::new(1, Method::Previews(previews::Params { nodes, fps: None }));
+    writeln!(stream, "{}", serde_json::to_string(&request).unwrap()).unwrap();
+    let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+    let response: serde_json::Value = read_line(&mut reader);
+    assert!(response["error"].is_null(), "{response}");
+    PreviewStream(reader)
+}
+
+fn next_frame(stream: &mut PreviewStream) -> futhark_protocol::previews::Event {
+    loop {
+        let event: futhark_protocol::previews::Event = read_line(&mut stream.0);
+        if matches!(event, futhark_protocol::previews::Event::Frame { .. }) {
+            return event;
+        }
+    }
+}
+
+fn read_line<T: serde::de::DeserializeOwned>(reader: &mut impl std::io::BufRead) -> T {
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    serde_json::from_str(&line).unwrap_or_else(|e| panic!("{e}: {line}"))
 }

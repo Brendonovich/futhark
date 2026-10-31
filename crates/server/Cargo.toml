@@ -12,12 +12,15 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
+futhark-gpu.workspace = true
 futhark-graph.workspace = true
 futhark-ops.workspace = true
 futhark-project.workspace = true
 futhark-protocol.workspace = true
+futhark-surfaces.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+wgpu.workspace = true
 
 [dev-dependencies]
 futhark-client.workspace = true

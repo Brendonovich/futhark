@@ -169,3 +169,30 @@ fn the_pool_reuses_dropped_textures() {
     assert_eq!(pool.len(), 1);
     drop(c);
 }
+
+#[test]
+fn draws_into_a_rectangle_and_keeps_the_rest() {
+    let gpu = Gpu::headless().unwrap();
+    let mut red_green_8 = [[0; 16]; 2];
+    red_green_8[0][..4].copy_from_slice(&[255, 0, 0, 255]);
+    red_green_8[1][..4].copy_from_slice(&[0, 255, 0, 255]);
+    let source = red_green(&gpu, wgpu::TextureFormat::Rgba8Unorm, &red_green_8);
+    let source = source.create_view(&Default::default());
+    let target = texture(&gpu, 8, 8, wgpu::TextureFormat::Bgra8Unorm);
+    let view = target.create_view(&Default::default());
+
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    // Stretched into the top-left 2×2, after clearing everything.
+    gpu.draw_scaled_into(&mut encoder, &source, &view, [0, 0, 2, 2], Fit::Stretch, true);
+    // Then into the bottom-right 4×2, keeping the first.
+    gpu.draw_scaled_into(&mut encoder, &source, &view, [4, 6, 4, 2], Fit::Stretch, false);
+    gpu.queue.submit([encoder.finish()]);
+
+    let pixels = gpu.read_texture(&target).unwrap();
+    let at = |x: usize, y: usize| -> [u8; 4] { pixels[(y * 8 + x) * 4..][..4].try_into().unwrap() };
+    const RED: [u8; 4] = [0, 0, 255, 255];
+    const GREEN: [u8; 4] = [0, 255, 0, 255];
+    assert_eq!((at(0, 0), at(1, 1)), (RED, GREEN));
+    assert_eq!((at(4, 7), at(7, 6)), (RED, GREEN));
+    assert_eq!((at(3, 3), at(2, 0), at(3, 6)), ([0; 4], [0; 4], [0; 4]));
+}

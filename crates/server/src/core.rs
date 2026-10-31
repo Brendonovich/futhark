@@ -8,13 +8,21 @@ use std::{
     time::{Duration, Instant},
 };
 
-use futhark_graph::{Clock, Engine, Network, OpId, Registry};
+use std::collections::HashMap;
+
+use futhark_gpu::Gpu;
+use futhark_graph::{Clock, Engine, Network, OpId, Output, Registry};
 use futhark_protocol::{
     ChannelSamples, CreateParams, Edit, EditParams, Edited, Event, Hello, Method, OpenParams, Opened, PROTOCOL,
-    ProjectInfo, RpcError, Sample, SampleParams, Snapshot, Status,
+    ProjectInfo, RpcError, Sample, SampleParams, Snapshot, Status, previews, shared,
 };
 
-use crate::{convert, to_value};
+use crate::{
+    convert,
+    rings::Completions,
+    streams::{Draw, Previewer, Viewer},
+    to_value,
+};
 
 type Job = Box<dyn FnOnce(&mut Core) + Send>;
 
@@ -43,10 +51,23 @@ pub fn spawn() -> Handle {
     thread::Builder::new()
         .name("engine".into())
         .spawn(move || {
+            let gpu = match Gpu::headless() {
+                Ok(gpu) => Some(Arc::new(gpu)),
+                Err(error) => {
+                    eprintln!("futharkd: no GPU, so Texture operators won't cook: {error}");
+                    None
+                }
+            };
+            let completions = gpu.clone().map(Completions::spawn);
             let mut core = Core {
                 registry: Arc::new(futhark_ops::registry()),
+                gpu,
+                completions,
                 open: None,
                 subscribers: Vec::new(),
+                viewers: HashMap::new(),
+                previewers: HashMap::new(),
+                next_stream: 1,
             };
             loop {
                 match queue.recv_timeout(core.until_next_frame()) {
@@ -62,8 +83,13 @@ pub fn spawn() -> Handle {
 
 pub struct Core {
     registry: Arc<Registry>,
+    gpu: Option<Arc<Gpu>>,
+    completions: Option<Completions>,
     open: Option<OpenProject>,
     subscribers: Vec<mpsc::Sender<Event>>,
+    viewers: HashMap<u64, Viewer>,
+    previewers: HashMap<u64, Previewer>,
+    next_stream: u64,
 }
 
 struct OpenProject {
@@ -101,14 +127,103 @@ impl Core {
         }
     }
 
-    /// Moves the clock to the current frame, skipping frames that were missed.
+    /// Moves the clock to the current frame, skipping frames that were missed, and draws the streams that are due.
     fn tick(&mut self) {
-        if let Some(open) = &mut self.open {
-            let frame = open.frame_now();
-            if frame != open.engine.clock().frame {
-                open.engine.set_frame(frame);
-            }
+        let Some(open) = &mut self.open else { return };
+        let frame = open.frame_now();
+        if frame != open.engine.clock().frame {
+            open.engine.set_frame(frame);
         }
+        let mut draw = Draw {
+            engine: &mut open.engine,
+            gpu: self.gpu.as_deref(),
+            completions: self.completions.as_ref(),
+            frame,
+            rate: open.rate,
+        };
+        self.viewers.retain(|_, viewer| viewer.draw(&mut draw));
+        self.previewers.retain(|_, previewer| previewer.draw(&mut draw));
+    }
+
+    fn shared_transport(&self) -> Option<&'static str> {
+        (self.gpu.is_some() && futhark_surfaces::TRANSPORT != "unsupported").then_some(futhark_surfaces::TRANSPORT)
+    }
+
+    /// Starts a `shared_frames` viewer. Its events go to `events` until it ends.
+    pub fn start_viewer(
+        &mut self,
+        params: shared::Params,
+        events: mpsc::Sender<shared::Event>,
+    ) -> Result<(u64, shared::Started), RpcError> {
+        let transport = self.shared_transport().ok_or_else(|| {
+            RpcError::new(
+                RpcError::UNSUPPORTED,
+                "shared frames need a GPU and shared surfaces, which this server lacks",
+            )
+        })?;
+        let rate = self.open_project()?.rate;
+        let id = self.next_stream;
+        self.next_stream += 1;
+        self.viewers.insert(id, Viewer::new(params, rate, events));
+        self.tick();
+        Ok((
+            id,
+            shared::Started {
+                transport: transport.into(),
+            },
+        ))
+    }
+
+    pub fn viewer_control(&mut self, id: u64, control: shared::Control) {
+        if let Some(viewer) = self.viewers.get_mut(&id) {
+            viewer.control(control);
+        }
+    }
+
+    pub fn stop_viewer(&mut self, id: u64) {
+        self.viewers.remove(&id);
+    }
+
+    /// Starts a `previews` stream. Its events go to `events` until it ends.
+    pub fn start_previews(
+        &mut self,
+        params: previews::Params,
+        events: mpsc::Sender<previews::Event>,
+    ) -> Result<(u64, shared::Started), RpcError> {
+        self.open_project()?;
+        let id = self.next_stream;
+        self.next_stream += 1;
+        self.previewers.insert(id, Previewer::new(params, events));
+        self.tick();
+        let transport = self.shared_transport().unwrap_or("unsupported");
+        Ok((
+            id,
+            shared::Started {
+                transport: transport.into(),
+            },
+        ))
+    }
+
+    pub fn previews_control(&mut self, id: u64, control: previews::Control) {
+        if let Some(previewer) = self.previewers.get_mut(&id) {
+            previewer.control(control);
+        }
+    }
+
+    pub fn stop_previews(&mut self, id: u64) {
+        self.previewers.remove(&id);
+    }
+
+    /// Ends every viewer and preview stream, when the project they show goes away.
+    fn end_streams(&mut self, reason: &str) {
+        for viewer in self.viewers.values() {
+            viewer.end(reason);
+        }
+        for previewer in self.previewers.values() {
+            previewer.end(reason);
+        }
+        self.viewers.clear();
+        self.previewers.clear();
     }
 
     /// Registers a `watch` connection. Returns its events and the current status.
@@ -142,7 +257,10 @@ impl Core {
             Method::Hello => to_value(&Hello {
                 protocol: PROTOCOL,
                 version: env!("CARGO_PKG_VERSION").into(),
-                capabilities: Vec::new(),
+                capabilities: self
+                    .shared_transport()
+                    .map(|transport| vec![format!("shared-frames:{transport}"), format!("previews:{transport}")])
+                    .unwrap_or_default(),
             }),
             Method::Status => to_value(&self.status()),
             Method::Create(params) => to_value(&self.create(params)?),
@@ -156,6 +274,7 @@ impl Core {
                 serde_json::Value::Null
             }
             Method::Close => {
+                self.end_streams("the project was closed");
                 if self.open.take().is_some() {
                     self.emit(Event::ProjectClosed);
                 }
@@ -165,13 +284,9 @@ impl Core {
             Method::Get => to_value(&self.snapshot()?),
             Method::Edit(params) => to_value(&self.edit(params)?),
             Method::Sample(params) => to_value(&self.sample(params)?),
-            Method::SharedFrames(_) => {
-                return Err(RpcError::new(
-                    RpcError::UNSUPPORTED,
-                    "shared frames need the Texture family",
-                ));
+            Method::Watch | Method::Shutdown | Method::SharedFrames(_) | Method::Previews(_) => {
+                unreachable!("handled by the connection")
             }
-            Method::Watch | Method::Shutdown => unreachable!("handled by the connection"),
         })
     }
 
@@ -196,13 +311,15 @@ impl Core {
         let dir = absolute(&params.path)?;
         let (project, diagnostics) =
             futhark_project::load(&dir, self.registry.clone()).map_err(|e| RpcError::failed(e.to_string()))?;
-        let engine = Engine::new(
-            project.network,
-            Clock {
-                rate: project.rate,
-                frame: 0,
-            },
-        );
+        let clock = Clock {
+            rate: project.rate,
+            frame: 0,
+        };
+        let mut engine = Engine::new(project.network, clock).with_project_dir(&dir);
+        if let Some(gpu) = &self.gpu {
+            engine = engine.with_gpu(gpu.clone());
+        }
+        self.end_streams("another project was opened");
         let open = OpenProject {
             dir,
             name: project.name,
@@ -270,19 +387,27 @@ impl Core {
             .engine
             .pull(id)
             .map_err(|e| RpcError::failed(format!("{}: {e}", params.path)))?;
-        let channels = output.channels().expect("only Channel operators have outputs so far");
-        Ok(Sample::Channel {
-            frame: open.engine.clock().frame,
-            rate: channels.rate,
-            start: channels.start,
-            channels: channels
-                .channels()
-                .iter()
-                .map(|c| ChannelSamples {
-                    name: c.name.clone(),
-                    samples: c.samples.clone(),
-                })
-                .collect(),
+        let frame = open.engine.clock().frame;
+        Ok(match output {
+            Output::Channels(channels) => Sample::Channel {
+                frame,
+                rate: channels.rate,
+                start: channels.start,
+                channels: channels
+                    .channels()
+                    .iter()
+                    .map(|c| ChannelSamples {
+                        name: c.name.clone(),
+                        samples: c.samples.clone(),
+                    })
+                    .collect(),
+            },
+            Output::Texture(texture) => Sample::Texture {
+                frame,
+                width: texture.width(),
+                height: texture.height(),
+                format: format!("{:?}", texture.format()),
+            },
         })
     }
 }

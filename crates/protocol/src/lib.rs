@@ -83,6 +83,9 @@ pub enum Method {
     /// carries [`shared::Event`]s from the server and [`shared::Control`]s from the client, one JSON object per line.
     /// Local clients only, on systems with a shared-surface transport (see `hello`'s capabilities).
     SharedFrames(shared::Params),
+    /// Live previews of many operators at once, for the nodes of a network editor. Replies with
+    /// [`shared::Started`], then carries [`previews::Event`]s and [`previews::Control`]s like `shared_frames`.
+    Previews(previews::Params),
     /// Stops the server. Returns `null`.
     Shutdown,
 }
@@ -412,6 +415,13 @@ pub enum Sample {
         start: i64,
         channels: Vec<ChannelSamples>,
     },
+    /// Texture pixels stay on the server; see them with `shared_frames` or `previews`.
+    Texture {
+        frame: i64,
+        width: u32,
+        height: u32,
+        format: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -558,6 +568,84 @@ pub mod shared {
         Size {
             max_width: u32,
             max_height: u32,
+        },
+    }
+}
+
+/// Previews: live thumbnails of every operator a network editor shows. Texture operators are drawn into one atlas
+/// surface per slot of a shared ring (fetched and released as in [`shared`]); Channel operators send their latest
+/// values in the frame message itself.
+pub mod previews {
+    use serde::{Deserialize, Serialize};
+
+    pub const DEFAULT_FPS: u32 = 30;
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    pub struct Params {
+        pub nodes: Vec<Node>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub fps: Option<u32>,
+    }
+
+    /// An operator to preview, and the most pixels its preview may take. The picture keeps its own shape inside.
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    pub struct Node {
+        pub path: String,
+        pub width: u32,
+        pub height: u32,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    pub enum Event {
+        /// A new ring of atlas surfaces. Fetch them from `service` with `token`.
+        Ring {
+            generation: u64,
+            width: u32,
+            height: u32,
+            slots: u32,
+            service: String,
+            token: String,
+        },
+        /// The previews of engine frame `frame`. Texture pictures are in `slot` of ring `generation`, at each
+        /// preview's `rect`; `slot` is absent when no Texture operator is being previewed.
+        Frame {
+            generation: u64,
+            slot: Option<u32>,
+            frame: i64,
+            previews: Vec<Preview>,
+        },
+        End {
+            reason: String,
+        },
+    }
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    pub struct Preview {
+        pub path: String,
+        /// `[x, y, width, height]` in the atlas, for Texture operators.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub rect: Option<[u32; 4]>,
+        /// The latest sample of each channel, for Channel operators.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub channels: Option<Vec<(String, f32)>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub error: Option<String>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    pub enum Control {
+        /// Replaces the operators being previewed, as the user pans and zooms.
+        Nodes {
+            nodes: Vec<Node>,
+        },
+        Release {
+            generation: u64,
+            slot: u32,
+        },
+        Fps {
+            fps: u32,
         },
     }
 }

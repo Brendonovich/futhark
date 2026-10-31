@@ -9,14 +9,20 @@ A TouchDesigner-style realtime node-based environment built on Rune and wgpu. Re
 - `crates/macros`: the `Params` and `Menu` derives, re-exported by `futhark-graph`.
 - `crates/ops`: the built-in operators, and `registry()` listing them.
 - `crates/project`: reading and writing the KDL project format.
-- `crates/gpu`: the engine-owned wgpu context and readback.
-- `crates/cli`: the `futhark` binary.
+- `crates/gpu`: the wgpu context, the texture pool, `draw_scaled` and readback.
+- `crates/surfaces`: shared GPU surfaces (IOSurfaces over Mach on macOS; a stub elsewhere).
+- `crates/protocol`: the protocol's types (JSON-RPC methods, events, `shared` and `previews` streams).
+- `crates/server`: `futharkd`. One engine thread owns all state; connection threads hand it jobs.
+- `crates/client`: the client library, including shared frames.
+- `crates/cli`: the `futhark` binary: a client of the server, plus offline `new`, `check` and `cook`.
 - `examples/`: example projects. Tests check each loads cleanly and saves back byte for byte.
 
 ## Commands
 
 - `scripts/check`: everything CI runs (fmt, clippy, tests). Done means it passes.
-- `cargo run -p futhark -- cook examples/hello /mix --frames 10` cooks an operator and prints its output.
+- `cargo run -p futhark -- open examples/hello` starts the server if needed and opens a project; then `get`, `set`,
+  `add`, `connect`, `sample`, `watch`, `view` (shared frames), `save`, `shutdown`. `--json` prints results as JSON.
+- `cargo run -p futhark -- cook examples/hello /mix --frames 10` cooks an operator offline and prints its output.
 - `cargo run -p futhark -- check <project>` reports anything that doesn't load cleanly.
 - `cargo run -p futhark -- gpu` shows the GPU adapter the engine picks.
 

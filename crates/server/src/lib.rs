@@ -3,6 +3,8 @@
 
 mod convert;
 mod core;
+mod rings;
+mod streams;
 
 use std::{
     fs,
@@ -87,7 +89,8 @@ fn bind(path: &Path) -> io::Result<UnixListener> {
 
 fn serve(stream: UnixStream, core: &core::Handle, stop: &mpsc::Sender<()>) -> io::Result<()> {
     let mut writer = stream.try_clone()?;
-    for line in BufReader::new(stream).lines() {
+    let mut lines = BufReader::new(stream).lines();
+    while let Some(line) = lines.next() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
@@ -109,6 +112,34 @@ fn serve(stream: UnixStream, core: &core::Handle, stop: &mpsc::Sender<()>) -> io
                 }
                 return Ok(());
             }
+            Method::SharedFrames(params) => {
+                let (events, received) = mpsc::channel();
+                let started = core.call(move |core: &mut Core| core.start_viewer(params, events));
+                return run_stream(
+                    writer,
+                    lines,
+                    id,
+                    started,
+                    received,
+                    core,
+                    |core: &mut Core, id, control| core.viewer_control(id, control),
+                    |core: &mut Core, id| core.stop_viewer(id),
+                );
+            }
+            Method::Previews(params) => {
+                let (events, received) = mpsc::channel();
+                let started = core.call(move |core: &mut Core| core.start_previews(params, events));
+                return run_stream(
+                    writer,
+                    lines,
+                    id,
+                    started,
+                    received,
+                    core,
+                    |core: &mut Core, id, control| core.previews_control(id, control),
+                    |core: &mut Core, id| core.stop_previews(id),
+                );
+            }
             Method::Shutdown => {
                 write_line(&mut writer, &Response::ok(id, serde_json::Value::Null))?;
                 let _ = stop.send(());
@@ -124,6 +155,46 @@ fn serve(stream: UnixStream, core: &core::Handle, stop: &mpsc::Sender<()>) -> io
         }
     }
     Ok(())
+}
+
+/// Runs a stream that took over a connection: events from the engine thread go out, controls from the client come
+/// in on a second thread, and either side closing stops it.
+#[allow(clippy::too_many_arguments)]
+fn run_stream<E, C>(
+    mut writer: UnixStream,
+    lines: io::Lines<BufReader<UnixStream>>,
+    id: u64,
+    started: Result<(u64, futhark_protocol::shared::Started), RpcError>,
+    events: mpsc::Receiver<E>,
+    core: &core::Handle,
+    control: fn(&mut Core, u64, C),
+    stop: fn(&mut Core, u64),
+) -> io::Result<()>
+where
+    E: serde::Serialize,
+    C: serde::de::DeserializeOwned + Send + 'static,
+{
+    let (stream, started) = match started {
+        Ok(started) => started,
+        Err(error) => return write_line(&mut writer, &Response::error(Some(id), error)),
+    };
+    write_line(&mut writer, &Response::ok(id, to_value(&started)))?;
+
+    let reader_core = core.clone();
+    thread::spawn(move || {
+        for line in lines {
+            let Ok(line) = line else { break };
+            match serde_json::from_str::<C>(&line) {
+                Ok(message) => reader_core.call(move |core: &mut Core| control(core, stream, message)),
+                Err(error) => eprintln!("futharkd: ignoring a stream control: {error}"),
+            }
+        }
+        reader_core.call(move |core: &mut Core| stop(core, stream));
+    });
+
+    let result = events.iter().try_for_each(|event| write_line(&mut writer, &event));
+    core.call(move |core: &mut Core| stop(core, stream));
+    result
 }
 
 /// Parses a request line, or makes the error response for it.

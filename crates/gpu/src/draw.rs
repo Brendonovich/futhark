@@ -91,7 +91,24 @@ impl Gpu {
         target: &wgpu::TextureView,
         fit: Fit,
     ) {
-        let (src, dst) = (source.texture(), target.texture());
+        let (width, height) = (target.texture().width(), target.texture().height());
+        self.draw_scaled_into(encoder, source, target, [0, 0, width, height], fit, true);
+    }
+
+    /// Like [`draw_scaled`](Self::draw_scaled), into the rectangle `[x, y, width, height]` of `target` only. With
+    /// `clear` the whole target is cleared first; without it the rest of the target keeps its contents, which is how
+    /// an atlas of previews is drawn one rectangle at a time.
+    pub fn draw_scaled_into(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        source: &wgpu::TextureView,
+        target: &wgpu::TextureView,
+        [x, y, width, height]: [u32; 4],
+        fit: Fit,
+        clear: bool,
+    ) {
+        let src = source.texture();
+        let dst = target.texture();
         let filterable = self.filterable(src.format());
         let (pipeline, layout, sampler) = {
             let mut drawer = self.drawer.lock().unwrap_or_else(|e| e.into_inner());
@@ -108,7 +125,7 @@ impl Gpu {
             (pipeline, layout, sampler)
         };
 
-        let placement = fit.placement((src.width(), src.height()), (dst.width(), dst.height()));
+        let placement = fit.placement((src.width(), src.height()), (width.max(1), height.max(1)));
         let placement = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("draw_scaled placement"),
             contents: &placement.map(f32::to_le_bytes).concat(),
@@ -139,12 +156,21 @@ impl Gpu {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    load: if clear {
+                        wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                    } else {
+                        wgpu::LoadOp::Load
+                    },
                     store: wgpu::StoreOp::Store,
                 },
             })],
             ..Default::default()
         });
+        if width == 0 || height == 0 {
+            return;
+        }
+        pass.set_viewport(x as f32, y as f32, width as f32, height as f32, 0.0, 1.0);
+        pass.set_scissor_rect(x, y, width, height);
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
         pass.draw(0..3, 0..1);

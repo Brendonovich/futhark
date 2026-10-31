@@ -73,6 +73,20 @@ enum Command {
     Sample { path: String },
     /// Print the server's events as they happen.
     Watch,
+    /// Watch a Texture operator through shared GPU surfaces and print each frame.
+    View {
+        path: String,
+        /// Stop after this many frames.
+        #[arg(long, default_value_t = 10)]
+        frames: u32,
+        /// The largest picture to ask for, in pixels on each side.
+        #[arg(long, default_value_t = 640)]
+        max: u32,
+        /// Read every frame's pixels back and fail on one that is fully transparent, which would mean a slot was
+        /// announced before it was drawn.
+        #[arg(long)]
+        check: bool,
+    },
     /// Call any method directly: `futhark call edit '{"edits": [...]}'`. Prints the JSON result.
     Call {
         method: String,
@@ -261,8 +275,22 @@ fn run(cli: Cli) -> Result<(), String> {
                         .collect();
                     format!("frame {frame}  {}", values.join("  "))
                 }
+                Sample::Texture {
+                    frame,
+                    width,
+                    height,
+                    format,
+                } => {
+                    format!("frame {frame}  {width}×{height} {format}")
+                }
             });
         }
+        Command::View {
+            path,
+            frames,
+            max,
+            check,
+        } => view(&cli, path, *frames, *max, *check)?,
         Command::Watch => {
             let (_, events) = connect(&cli.socket, true)?.watch().map_err(err)?;
             for event in events {
@@ -324,22 +352,35 @@ fn run(cli: Cli) -> Result<(), String> {
             }
         }
         Command::Cook { project, op, frames } => {
+            let project_dir = project.clone();
             let (project, diagnostics) = load(project, registry()).map_err(|e| e.to_string())?;
             for diagnostic in &diagnostics {
                 eprintln!("warning: {diagnostic}");
             }
             let id = project.network.find(op).ok_or_else(|| format!("no operator at {op}"))?;
-            let mut engine = Engine::new(
-                project.network,
-                Clock {
-                    rate: project.rate,
-                    frame: 0,
-                },
-            );
+            let clock = Clock {
+                rate: project.rate,
+                frame: 0,
+            };
+            let dir = std::path::absolute(&project_dir).map_err(|e| e.to_string())?;
+            let mut engine = Engine::new(project.network, clock).with_project_dir(dir);
+            match Gpu::headless() {
+                Ok(gpu) => engine = engine.with_gpu(Arc::new(gpu)),
+                Err(error) => eprintln!("warning: no GPU, so Texture operators won't cook: {error}"),
+            }
             for frame in 0..i64::from(*frames) {
                 engine.set_frame(frame);
                 let output = engine.pull(id).map_err(|e| format!("{op}: {e}"))?;
-                let channels = output.channels().expect("only Channel operators exist so far");
+                let Some(channels) = output.channels() else {
+                    let texture = output.texture().expect("Channel or Texture");
+                    println!(
+                        "{frame:>5}  {}×{} {:?}",
+                        texture.width(),
+                        texture.height(),
+                        texture.format()
+                    );
+                    continue;
+                };
                 let values: Vec<String> = channels
                     .channels()
                     .iter()
@@ -356,6 +397,40 @@ fn run(cli: Cli) -> Result<(), String> {
             println!("type: {:?}", info.device_type);
             if !info.driver.is_empty() {
                 println!("driver: {} {}", info.driver, info.driver_info);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn view(cli: &Cli, path: &str, frames: u32, max: u32, check: bool) -> Result<(), String> {
+    let params = futhark_protocol::shared::Params {
+        path: path.into(),
+        max_width: max,
+        max_height: max,
+        fps: None,
+        slots: None,
+    };
+    let mut stream = connect(&cli.socket, true)?
+        .shared_frames(params)
+        .map_err(|e| e.to_string())?;
+    let mut seen = 0;
+    while seen < frames {
+        match stream.recv().map_err(|e| e.to_string())? {
+            None => return Err("the stream ended".into()),
+            Some(futhark_client::Update::Error(message)) => println!("error: {message}"),
+            Some(futhark_client::Update::Frame(frame)) => {
+                seen += 1;
+                let (width, height) = (frame.surface.width(), frame.surface.height());
+                let mut line = format!("frame {}  {width}×{height}  slot {}", frame.frame, frame.slot);
+                if check {
+                    let pixels = frame.surface.read_bgra();
+                    if pixels.chunks(4).all(|p| p == [0, 0, 0, 0]) {
+                        return Err(format!("frame {} is empty", frame.frame));
+                    }
+                    line.push_str("  ok");
+                }
+                println!("{line}");
             }
         }
     }

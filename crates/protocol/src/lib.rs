@@ -79,6 +79,10 @@ pub enum Method {
     Sample(SampleParams),
     /// Replies with [`Status`], then streams [`Event`]s as [`Notification`]s.
     Watch,
+    /// Shows a Texture operator through shared GPU surfaces. Replies with [`shared::Started`], then the connection
+    /// carries [`shared::Event`]s from the server and [`shared::Control`]s from the client, one JSON object per line.
+    /// Local clients only, on systems with a shared-surface transport (see `hello`'s capabilities).
+    SharedFrames(shared::Params),
     /// Stops the server. Returns `null`.
     Shutdown,
 }
@@ -128,6 +132,8 @@ impl RpcError {
     pub const FAILED: i64 = -32000;
     /// The request doesn't fit the server's state: no project is open, or an edit's revision is stale.
     pub const WRONG_STATE: i64 = -32001;
+    /// This server can't do that, such as shared frames on a system without a shared-surface transport.
+    pub const UNSUPPORTED: i64 = -32003;
 
     pub fn new(code: i64, message: impl Into<String>) -> Self {
         RpcError {
@@ -481,5 +487,77 @@ mod tests {
             line,
             json!({ "jsonrpc": "2.0", "method": "event", "params": { "type": "network_changed", "revision": 4 } })
         );
+    }
+}
+
+/// Shared frames: a viewer of a Texture operator drawn by the server's GPU into a ring of surfaces the client shows
+/// without copying.
+///
+/// The server sends a [`Ring`](shared::Event::Ring) naming a surface service and a one-time token, and the client
+/// fetches the ring's surfaces with them (`futhark_surfaces::fetch`). Each [`Frame`](shared::Event::Frame) then names
+/// the slot holding a finished picture; the slot stays the client's until it sends a
+/// [`Release`](shared::Control::Release). A new ring (a new generation) replaces the old one when the size changes.
+pub mod shared {
+    use serde::{Deserialize, Serialize};
+
+    pub const DEFAULT_SLOTS: u32 = 4;
+    pub const MAX_SLOTS: u32 = 8;
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    pub struct Params {
+        /// The Texture operator to show.
+        pub path: String,
+        /// The largest picture the client wants. The ring fits the texture into it, keeping its shape.
+        pub max_width: u32,
+        pub max_height: u32,
+        /// Frames per second, at most the project's rate.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub fps: Option<u32>,
+        /// Surfaces in the ring, 2 to 8.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub slots: Option<u32>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    pub struct Started {
+        /// How surfaces travel, such as `iosurface-mach`.
+        pub transport: String,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    pub enum Event {
+        /// A new ring of surfaces. Fetch them from `service` with `token`.
+        Ring {
+            generation: u64,
+            width: u32,
+            height: u32,
+            slots: u32,
+            service: String,
+            token: String,
+        },
+        /// `slot` of ring `generation` holds the picture of engine frame `frame`, finished on the GPU.
+        Frame { generation: u64, slot: u32, frame: i64 },
+        /// The operator has no picture right now (for example, a cook error). Frames resume when it does.
+        Error { message: String },
+        /// The stream is over.
+        End { reason: String },
+    }
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    pub enum Control {
+        /// The client no longer shows this slot; the server may draw into it again.
+        Release {
+            generation: u64,
+            slot: u32,
+        },
+        Fps {
+            fps: u32,
+        },
+        Size {
+            max_width: u32,
+            max_height: u32,
+        },
     }
 }

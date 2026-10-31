@@ -1,6 +1,10 @@
 //! A client of `futharkd`. Calls are synchronous and in order, one at a time per connection. `watch` takes over its
 //! connection, so open another `Client` for calls while watching.
 
+mod shared;
+
+pub use shared::{FrameControl, SharedFrame, SharedFrames, Update};
+
 use std::{
     fs::OpenOptions,
     io::{self, BufRead, BufReader, Write},
@@ -106,6 +110,12 @@ impl Client {
             (Some(result), None) => Ok(result),
             (None, None) => Ok(serde_json::Value::Null),
         }
+    }
+
+    /// Turns this connection into a viewer of a Texture operator through shared GPU surfaces.
+    pub fn shared_frames(mut self, params: futhark_protocol::shared::Params) -> Result<SharedFrames> {
+        let started: futhark_protocol::shared::Started = self.call(Method::SharedFrames(params))?;
+        Ok(SharedFrames::new(self.reader, self.writer, started.transport))
     }
 
     fn read_line<T: DeserializeOwned>(&mut self) -> Result<T> {

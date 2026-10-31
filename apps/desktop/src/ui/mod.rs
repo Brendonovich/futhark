@@ -7,7 +7,7 @@ mod viewer;
 use std::path::PathBuf;
 
 use futhark_protocol::Family;
-use rune::{Color, Cx, El, FileDialogOptions, TextStyle, Tx, col, el, oklch, row, spacer, text};
+use rune::{Anim, Color, Cx, El, FileDialogOptions, Spring, TextStyle, Tx, col, el, oklch, row, spacer, text};
 use rune_kit::{Button, ButtonVariant, Kit, Menu, MenuItem, TextInput};
 
 use crate::app::{App, Connection};
@@ -57,7 +57,11 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         .fill(k.c.bg_base)
         .child(toolbar(s, &k, &mut layer))
         .child(body);
+    // The app has no animation: every change, entrance, exit, colour and hover lands on the next frame.
     rune_kit::root(window, layer)
+        .instant_changes()
+        .motion(Spring::NONE)
+        .hover_motion_within(Anim::INSTANT, Anim::INSTANT)
 }
 
 fn toolbar(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {

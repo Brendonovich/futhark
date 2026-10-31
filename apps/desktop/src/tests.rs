@@ -376,3 +376,31 @@ fn pinches_during_a_scroll_dont_zoom() {
     assert_eq!(rt.state.camera.pan, pinched.pan, "the pinch owns the gesture");
     assert_ne!(pinched.pan, pan);
 }
+
+#[test]
+fn nothing_animates() {
+    let mut rt = runtime();
+    rt.on_key = Some(crate::on_key);
+    // After each change, one frame shows it and the next has nothing left to do.
+    let done = |rt: &mut Runtime<App>, what: &str| {
+        rt.frame(1.0 / 60.0);
+        assert!(!rt.frame(1.0 / 60.0), "{what} is still animating");
+    };
+    let at = centre(rect(&rt, "node:/noise1"));
+    rt.pointer_move(at.0, at.1);
+    done(&mut rt, "hovering a node");
+    rt.pointer_down(at.0, at.1);
+    rt.pointer_up(at.0, at.1);
+    done(&mut rt, "selecting a node");
+    rt.key(KeyEvent {
+        key: Key::Tab,
+        mods: Mods::default(),
+    });
+    done(&mut rt, "opening the add menu");
+    assert!(has(&rt, "add-menu-menu"));
+    rt.key(KeyEvent {
+        key: Key::Escape,
+        mods: Mods::default(),
+    });
+    done(&mut rt, "closing the add menu");
+}

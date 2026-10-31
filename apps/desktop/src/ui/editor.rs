@@ -20,8 +20,7 @@ use crate::previews::Preview;
 
 pub fn editor(s: &App, k: &Kit) -> El {
     let nodes = s.nodes();
-    // The camera moves the nodes, so they land where it says at once rather than springing there.
-    let mut world = el().key("world").absolute(0.0, 0.0).size(1.0, 1.0).instant_changes();
+    let mut world = el().key("world").absolute(0.0, 0.0).size(1.0, 1.0);
     if let Some(wires) = wires(s, &nodes) {
         world = world.child(wires);
     }

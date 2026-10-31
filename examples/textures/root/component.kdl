@@ -1,0 +1,43 @@
+glow "texture/ramp" {
+    width 640
+    height 360
+    kind radial
+    start_r 1.0
+    start_g 0.6
+    start_b 0.2
+    end_a 0.0
+}
+
+grade "texture/level" {
+    input mix
+    contrast 1.2
+    gamma 1.4
+}
+
+grain "texture/noise" {
+    width 640
+    height 360
+    period 0.5
+    octaves 3
+    amplitude 0.3
+    offset 0.3
+    monochrome #false
+}
+
+mix "texture/composite" {
+    input grain
+    input glow
+    operation screen
+}
+
+out "texture/shader" {
+    input spin
+}
+
+spin "texture/transform" {
+    input grade
+    scale_x 1.25
+    scale_y 1.25
+    rotate 15.0
+    extend mirror
+}

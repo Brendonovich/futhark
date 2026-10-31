@@ -7,8 +7,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+futhark-gpu.workspace = true
 futhark-macros.workspace = true
 thiserror.workspace = true
+wgpu.workspace = true
 
 [lints]
 workspace = true

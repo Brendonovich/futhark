@@ -1,6 +1,7 @@
 //! The built-in operators.
 
 pub mod channel;
+pub mod texture;
 
 use futhark_graph::Registry;
 
@@ -11,6 +12,14 @@ pub fn registry() -> Registry {
     registry.add_channel::<channel::Lfo>();
     registry.add_channel::<channel::Math>();
     registry.add_channel::<channel::Noise>();
+    registry.add_texture::<texture::Composite>();
+    registry.add_texture::<texture::Constant>();
+    registry.add_texture::<texture::FileIn>();
+    registry.add_texture::<texture::Level>();
+    registry.add_texture::<texture::Noise>();
+    registry.add_texture::<texture::Ramp>();
+    registry.add_texture::<texture::Shader>();
+    registry.add_texture::<texture::Transform>();
     registry
 }
 

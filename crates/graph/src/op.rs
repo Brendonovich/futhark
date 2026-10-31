@@ -1,5 +1,7 @@
 use std::{fmt, ops::Range, ops::RangeInclusive, sync::Arc};
 
+use futhark_gpu::Texture;
+
 use crate::{Channels, Params};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -84,12 +86,22 @@ impl std::error::Error for CookError {}
 #[derive(Clone, Debug, PartialEq)]
 pub enum Output {
     Channels(Arc<Channels>),
+    /// A texture on the engine's GPU. Its work has been submitted to the queue by the time `Engine::pull` returns.
+    Texture(Texture),
 }
 
 impl Output {
     pub fn channels(&self) -> Option<&Channels> {
         match self {
             Output::Channels(channels) => Some(channels),
+            _ => None,
+        }
+    }
+
+    pub fn texture(&self) -> Option<&Texture> {
+        match self {
+            Output::Texture(texture) => Some(texture),
+            _ => None,
         }
     }
 }

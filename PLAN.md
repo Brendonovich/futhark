@@ -193,54 +193,39 @@ script1 "data/text" file="controller.luau"
 
 ## Operator definitions
 
-Every operator type (its family, inputs, outputs, and parameters with types, defaults, ranges, menus, labels and
-docs) is declared in Rust, next to its cook code. [Specta](https://github.com/specta-rs/specta) describes the types,
-and our own `Params` derive adds what Specta doesn't model:
+Rust is the single source of truth for operator types. Each operator type is a Rust type whose parameters are a
+struct with a derive:
 
 ```rust
-#[derive(Type, Params)]
+/// Fractal noise.
+#[derive(Params)]
 pub struct NoiseParams {
-    /// Size of one noise cell.
+    /// Size of the noise features, in UV units.
     #[param(default = 1.0, min = 0.0, soft_max = 10.0)]
     pub period: f32,
     #[param(default = 1.0)]
     pub amp: f32,
     pub seed: i32,
-    #[param(default = Kind::Perlin)]
-    pub kind: Kind,
+    pub kind: NoiseKind, // a #[derive(Menu)] enum
 }
 
-#[derive(Type, Menu)]
-pub enum Kind { Perlin, Simplex, Worley }
+impl TextureOp for Noise {
+    type Params = NoiseParams;
+    const SPEC: OpSpec = OpSpec { name: "texture/noise", label: "Noise", inputs: 0..=0 };
+    fn cook(&mut self, cx: &mut TextureCx, params: &NoiseParams) -> Result<(), CookError> { ... }
+}
 ```
 
-- **Specta handles shape and docs.** `#[derive(Type)]` gives each type a runtime description: fields, types, enums,
-  `///` docs and deprecation. `#[specta]` does the same for the functions of the scripting API.
-- **`Params` adds parameter metadata.** Defaults, ranges, menus, labels and pages are stored as Specta runtime
-  attributes on the fields, so one type graph carries everything.
-- **One source, many outputs.** The registry built from these descriptions drives:
-  - the parameter inspector
-  - KDL reading and writing
-  - the Luau definition files for luau-lsp, through a new Specta exporter (below)
-  - the reference docs (`futhark docs`)
-
-  No generated files are committed.
-- **Mistakes fail at compile time where possible.** The macro rejects a default outside `min..max` and duplicate
-  names. A registry test covers the rest (unique type names, every family's converters registered).
-- Specta is still a 2.0 release candidate, so it is pinned to an exact version like everything else.
-
-### specta-luau
-
-A Luau exporter for Specta, written for Futhark and upstreamable to specta-rs. It turns Specta types and functions into
-luau-lsp definition files: structs become table types, enums become string-literal unions or tagged unions, and
-functions become `declare function`. `specta-typescript` is the closest model, since Luau's type syntax is close to
-TypeScript's.
-
-Specta has no notion of methods on a type. Script-facing handles (operators, parameters, channels) are Luau userdata
-with methods, so the exporter takes a small class description for them (a name, Specta functions as methods, Specta
-types as properties) and emits `declare class` blocks.
-
-- Custom parameters on components are project data, so they live in KDL.
+- **The derive produces a static parameter schema** from the struct: name, type, default, range, menu items, label,
+  and docs taken from doc comments. The engine, the editor's inspector, the KDL reader and writer, and Luau all read
+  that schema. Nothing is declared twice.
+- **The registry is an explicit list** of operator types in `crates/ops`, with no link-time registration magic.
+- **Generated artifacts come from the running registry.** `futhark defs` writes the Luau definition files for
+  luau-lsp, and `futhark docs` writes the operator reference. Both are rebuilt by the editor as needed, and CI checks
+  that committed copies are current.
+- **Schemas are validated in tests.** Every registered operator is checked for defaults within range, unique names
+  and valid menu defaults.
+- Custom parameters on components are project data, so they live in KDL with the same parameter types.
 
 ## Architecture
 
@@ -250,12 +235,11 @@ Planned workspace:
   scheduler and the clock. No GPU code.
 - `crates/gpu`: the wgpu context, texture and buffer pools, WGSL helpers and readback.
 - `crates/ops`: the built-in operators of every family.
-- `crates/project`: reading and writing the KDL project format, the file watcher and reload, and `check`.
 - `crates/macros`: the `Params` and `Menu` derives.
-- `crates/specta-luau`: the Specta exporter for Luau definition files.
+- `crates/project`: reading and writing the KDL project format, the file watcher and reload, and `check`.
 - `crates/script`: the Luau runtime (mlua), expression compilation and evaluation, and generation of the definition
   files and sourcemap.
-- `crates/cli`: a headless runner (render a project to files, run tests).
+- `crates/cli`: the `futhark` binary: headless runs, offline renders, `check`, `defs` and `docs`.
 - `apps/editor`: the Rune desktop app, including:
   - a network editor (a canvas with pan and zoom, nodes, wires)
   - a viewer for each family (textures drawn straight from the shared device through Rune effect slots)
@@ -266,9 +250,10 @@ Rune: pin `anomalyco/rune` to an exact `rev` on `dev`. Its wgpu is `~30.0.1`; ou
 
 ## Milestones
 
-1. **Skeleton**: the workspace, a headless wgpu context, and CI that runs tests offline and headless.
-2. **Graph core**: operators, wires, parameters, pull cooking and dirty propagation, with Channel operators (Constant,
-   LFO, Noise, Math) as the first test bed.
+1. **Skeleton**: the workspace, the engine-owned headless wgpu context, the `futhark` CLI, and CI that runs tests
+   offline and headless.
+2. **Graph core**: operators, wires, the `Params` derive, pull cooking and dirty propagation, and reading and writing
+   KDL. Channel operators (Constant, LFO, Noise, Math) are the first test bed.
 3. **Textures**: Constant, Ramp, Noise, Transform, Level, Composite, Shader, and File In. Headless golden-image tests
    via readback.
 4. **Editor**: the upstream Rune change to adopt an engine-created device, then a Rune app with the network editor,

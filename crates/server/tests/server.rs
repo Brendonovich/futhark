@@ -409,3 +409,31 @@ fn read_line<T: serde::de::DeserializeOwned>(reader: &mut impl std::io::BufRead)
     reader.read_line(&mut line).unwrap();
     serde_json::from_str(&line).unwrap_or_else(|e| panic!("{e}: {line}"))
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn closing_a_still_viewer_ends_it() {
+    use futhark_client::Update;
+    use futhark_protocol::shared;
+
+    let server = Server::start("close");
+    let project = server.example("textures");
+    server.client().open(&project).unwrap();
+    // /glow never changes, so after its first frame the stream would wait forever.
+    let params = shared::Params {
+        path: "/glow".into(),
+        max_width: 64,
+        max_height: 64,
+        fps: None,
+        slots: None,
+    };
+    let mut viewer = server.client().shared_frames(params).unwrap();
+    let Some(Update::Frame(_)) = viewer.recv().unwrap() else {
+        panic!("expected a frame")
+    };
+    let control = viewer.control();
+    let waiting = thread::spawn(move || viewer.recv().unwrap().is_none());
+    thread::sleep(Duration::from_millis(50));
+    control.close();
+    assert!(waiting.join().unwrap(), "recv returns None once closed");
+}

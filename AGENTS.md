@@ -15,6 +15,8 @@ A TouchDesigner-style realtime node-based environment built on Rune and wgpu. Re
 - `crates/server`: `futharkd`. One engine thread owns all state; connection threads hand it jobs.
 - `crates/client`: the client library, including shared frames.
 - `crates/cli`: the `futhark` binary: a client of the server, plus offline `new`, `check` and `cook`.
+- `apps/desktop`: the Rune desktop app, a client of the server: network editor with live node previews, inspector,
+  viewer. Rune is pinned by git `rev`.
 - `examples/`: example projects. Tests check each loads cleanly and saves back byte for byte.
 
 ## Commands
@@ -25,6 +27,8 @@ A TouchDesigner-style realtime node-based environment built on Rune and wgpu. Re
 - `cargo run -p futhark -- cook examples/hello /mix --frames 10` cooks an operator offline and prints its output.
 - `cargo run -p futhark -- check <project>` reports anything that doesn't load cleanly.
 - `cargo run -p futhark -- gpu` shows the GPU adapter the engine picks.
+- `cargo run -p futhark-desktop -- examples/textures` runs the desktop app. `-- --snap out.png --scene editor` renders
+  a fixed scene headlessly, without a server.
 
 ## Rules
 

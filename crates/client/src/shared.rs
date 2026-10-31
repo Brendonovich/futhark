@@ -72,6 +72,15 @@ impl FrameControl {
         self.send(&Control::Size { max_width, max_height });
     }
 
+    /// Ends the stream from any thread: `recv` returns `None`, and the server stops drawing.
+    pub fn close(&self) {
+        let _ = self
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .shutdown(std::net::Shutdown::Both);
+    }
+
     /// Best effort: a closed connection shows up as the end of the stream instead.
     fn send(&self, control: &Control) {
         let mut line = serde_json::to_string(control).expect("controls serialize");
@@ -198,6 +207,15 @@ impl PreviewControl {
 
     pub fn set_fps(&self, fps: u32) {
         self.send(&PreviewsControl::Fps { fps });
+    }
+
+    /// Ends the stream from any thread: `recv` returns `None`, and the server stops drawing.
+    pub fn close(&self) {
+        let _ = self
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .shutdown(std::net::Shutdown::Both);
     }
 
     fn send(&self, control: &PreviewsControl) {

@@ -126,7 +126,7 @@ impl Drop for StreamPreviews {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(control) = &lock(&self.shared).control {
-            control.set_nodes(Vec::new());
+            control.close();
         }
     }
 }

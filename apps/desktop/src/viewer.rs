@@ -97,10 +97,9 @@ impl TextureViewer {
 impl Drop for TextureViewer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        // The server sends frames only when the picture changes, so the thread may be waiting on a still one. Asking
-        // for the size again makes the server draw one more frame, which wakes it to see `stop` and hang up.
+        // The thread may be waiting on a still picture; closing the stream wakes it.
         if let Some(control) = lock(&self.control).as_ref() {
-            control.set_size(MAX_PIXELS, MAX_PIXELS);
+            control.close();
         }
     }
 }
